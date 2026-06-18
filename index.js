@@ -1,7 +1,25 @@
 require("dotenv").config();
 const express = require("express");
 const mongoose = require("mongoose");
+const admin = require("firebase-admin");
 
+// ====================== FIREBASE INITIALIZATION ======================
+if (!admin.apps.length) {
+  try {
+    const serviceAccount = JSON.parse(process.env.FIREBASE_SERVICE_ACCOUNT);
+    
+    admin.initializeApp({
+      credential: admin.credential.cert(serviceAccount),
+    });
+    
+    console.log("✅ Firebase Admin initialized successfully");
+  } catch (error) {
+    console.error("❌ Firebase initialization failed:", error.message);
+    console.error("Make sure FIREBASE_SERVICE_ACCOUNT is set correctly in environment variables");
+  }
+}
+
+// ====================== DB CONNECTION ======================
 const COMMON_OPTIONS = {
   serverSelectionTimeoutMS: 15000,
   connectTimeoutMS: 15000,
@@ -24,7 +42,7 @@ async function connectQuestionDB() {
     readPreference: "secondaryPreferred",
   });
 
-  questionConn.on("connected", () => console.log("Question DB (Cluster 1) connected"));
+  questionConn.on("connected", () => console.log("✅ Question DB connected"));
   questionConn.on("error", (err) => console.error("Question DB error:", err.message));
   questionConn.on("disconnected", () => console.warn("Question DB disconnected, reconnecting"));
   
@@ -39,7 +57,7 @@ async function connectUserDB() {
   
   userConn = mongoose.createConnection(uri, COMMON_OPTIONS);
   
-  userConn.on("connected", () => console.log("User DB (Cluster 2) connected"));
+  userConn.on("connected", () => console.log("✅ User DB connected"));
   userConn.on("error", (err) => console.error("User DB error:", err.message));
   userConn.on("disconnected", () => console.warn("User DB disconnected, reconnecting"));
   
@@ -49,40 +67,32 @@ async function connectUserDB() {
 
 async function connectAllDatabases() {
   await Promise.all([connectQuestionDB(), connectUserDB()]);
-  console.log("Both database clusters connected");
+  console.log("✅ Both database clusters connected");
 }
 
 function getQuestionDB() {
   if (!questionConn || questionConn.readyState !== 1) {
-    throw new Error("Question DB not connected. Call connectQuestionDB() first.");
+    throw new Error("Question DB not connected");
   }
   return questionConn;
 }
 
 function getUserDB() {
   if (!userConn || userConn.readyState !== 1) {
-    throw new Error("User DB not connected. Call connectUserDB() first.");
+    throw new Error("User DB not connected");
   }
   return userConn;
 }
 
-// ==================== QUESTION SCHEMA (Simplified & Matches Admin) ====================
+// ====================== QUESTION SCHEMA ======================
 const QuestionSchema = new mongoose.Schema({
   _id: { type: Number },
   exam: { type: String, required: true },
   year: { type: Number, required: true },
   paper: { type: String },
-  subject: {
-    type: String,
-    required: true,
-    trim: true
-  },
+  subject: { type: String, required: true, trim: true },
   topic: { type: String, trim: true },
-  imageUrl: {
-    type: String,
-    trim: true,
-    default: null
-  },
+  imageUrl: { type: String, trim: true, default: null },
   english: {
     question: { type: String, required: true },
     options: { type: Object, required: true }
@@ -95,11 +105,8 @@ const QuestionSchema = new mongoose.Schema({
   negativeMarks: { type: Number, default: 0.66 },
   correct_answer: { type: Number, required: true },
   batchId: { type: String }
-}, {
-  timestamps: true,
-});
+}, { timestamps: true });
 
-// Three separate collections
 const PcsQuestion = mongoose.model('PcsQuestion', QuestionSchema, 'pcsquestions');
 const BookQuestion = mongoose.model('BookQuestion', QuestionSchema, 'bookquestions');
 const ParagraphQuestion = mongoose.model('ParagraphQuestion', QuestionSchema, 'paragraphquestions');
@@ -110,17 +117,11 @@ const collections = {
   paragraphquestions: ParagraphQuestion
 };
 
-// Helper to get model by collection name
 function getQuestionModel(collectionName = 'pcsquestions') {
   return collections[collectionName] || PcsQuestion;
 }
 
-// Get all question models (useful when you want to query across collections)
-function getAllQuestionModels() {
-  return [PcsQuestion, BookQuestion, ParagraphQuestion];
-}
-
-// ==================== USER SCHEMA (Minimal as requested) ====================
+// ====================== USER SCHEMA ======================
 const UserSchema = new mongoose.Schema({
   userId: {
     type: String,
@@ -149,7 +150,7 @@ function getUserModel(connection) {
   return connection.model("User", UserSchema);
 }
 
-// ==================== ANALYTICS & ATTEMPT HISTORY (Kept as they are used) ====================
+// ====================== ANALYTICS SCHEMAS ======================
 const AccuracyBreakdownSchema = new mongoose.Schema({
   key: { type: String, required: true },
   attempted: { type: Number, default: 0 },
@@ -239,58 +240,28 @@ function getAttemptHistoryModel(connection) {
   return connection.model("AttemptHistory", AttemptHistorySchema);
 }
 
-// ==================== MIDDLEWARE & HELPERS ====================
-const optionalAuth = async (req, res, next) => {
-  // Firebase Auth should be handled in your route handlers or a separate Firebase middleware
-  next();
+// ====================== FIREBASE AUTH MIDDLEWARE ======================
+const firebaseAuth = async (req, res, next) => {
+  try {
+    const authHeader = req.headers.authorization;
+    if (!authHeader || !authHeader.startsWith("Bearer ")) {
+      return res.status(401).json({ success: false, message: "No token provided" });
+    }
+
+    const idToken = authHeader.split("Bearer ")[1];
+    const decodedToken = await admin.auth().verifyIdToken(idToken);
+    
+    req.user = decodedToken;
+    req.userId = decodedToken.uid;
+    
+    next();
+  } catch (error) {
+    console.error("Firebase Auth Error:", error.message);
+    return res.status(401).json({ success: false, message: "Invalid or expired token" });
+  }
 };
 
-const errorHandler = (err, req, res, next) => {
-  let statusCode = err.statusCode || 500;
-  let message = err.message || "Internal server error";
-
-  if (err.name === "ValidationError") {
-    statusCode = 400;
-    message = Object.values(err.errors).map(e => e.message).join(", ");
-  }
-  if (err.code === 11000) {
-    statusCode = 409;
-    const field = Object.keys(err.keyPattern || {})[0] || "field";
-    message = `${field} already exists`;
-  }
-  if (err.name === "CastError") {
-    statusCode = 400;
-    message = `Invalid value for field: ${err.path}`;
-  }
-
-  console.error("Error:", err.message);
-  res.status(statusCode).json({
-    success: false,
-    message,
-    ...(process.env.NODE_ENV !== "production" && { stack: err.stack }),
-  });
-};
-
-const notFound = (req, res) => {
-  res.status(404).json({
-    success: false,
-    message: `Route not found: ${req.method} ${req.originalUrl}`,
-  });
-};
-
-const validate = (req, res, next) => {
-  next(); // Stub - use if you add express-validator later
-};
-
-class AppError extends Error {
-  constructor(message, statusCode = 500) {
-    super(message);
-    this.statusCode = statusCode;
-    Error.captureStackTrace(this, this.constructor);
-  }
-}
-
-// Date helpers
+// ====================== HELPER FUNCTIONS ======================
 const IST_OFFSET_MS = 5.5 * 60 * 60 * 1000;
 
 function todayIST() {
@@ -311,10 +282,9 @@ function yesterdayIST() {
   ].join("-");
 }
 
-// Analytics helper functions (kept)
 function updateBreakdown(array, key, isCorrect) {
   if (!key) return array;
-  const entry = array.find(e => e.key === key);
+  const entry = array.find((e) => e.key === key);
   if (entry) {
     entry.attempted++;
     if (isCorrect) entry.correct++;
@@ -333,38 +303,104 @@ function updateBreakdown(array, key, isCorrect) {
 }
 
 function computeStrongWeak(subjectAccuracy) {
-  const qualified = subjectAccuracy.filter(s => s.attempted >= 5);
+  const qualified = subjectAccuracy.filter((s) => s.attempted >= 5);
   const sorted = [...qualified].sort((a, b) => b.accuracy - a.accuracy);
-  const strongSubjects = sorted.slice(0, 3).filter(s => s.accuracy >= 70).map(s => s.key);
-  const weakSubjects = sorted.slice(-3).reverse().filter(s => s.accuracy < 50).map(s => s.key);
+  const strongSubjects = sorted.slice(0, 3).filter((s) => s.accuracy >= 70).map((s) => s.key);
+  const weakSubjects = sorted.slice(-3).reverse().filter((s) => s.accuracy < 50).map((s) => s.key);
   return { strongSubjects, weakSubjects };
 }
 
-// updateAnalyticsOnSubmit function remains the same (omitted for brevity - copy from previous version if needed)
+async function updateAnalyticsOnSubmit({
+  userId,
+  questionId,
+  questionMeta,
+  selectedOption,
+  isCorrect,
+  isSkipped,
+  marksEarned,
+  timeTakenSeconds,
+  sessionId,
+}) {
+  const conn = getUserDB();
+  const Analytics = getAnalyticsModel(conn);
+  const AttemptHistory = getAttemptHistoryModel(conn);
+  const today = todayIST();
 
+  try {
+    await AttemptHistory.create({
+      userId: new mongoose.Types.ObjectId(userId), // Convert if needed
+      questionId,
+      exam: questionMeta?.exam,
+      subject: questionMeta?.subject,
+      topic: questionMeta?.topic,
+      subtopic: questionMeta?.subtopic,
+      paper: questionMeta?.paper,
+      year: questionMeta?.year,
+      difficulty: questionMeta?.difficulty,
+      selectedOption,
+      isCorrect,
+      isSkipped: isSkipped || false,
+      marksEarned,
+      timeTakenSeconds: timeTakenSeconds || 0,
+      sessionId,
+      attemptedAt: new Date(),
+    });
+
+    let analytics = await Analytics.findOne({ userId });
+    if (!analytics) {
+      analytics = new Analytics({ userId });
+    }
+
+    analytics.totalAttempted++;
+    if (isCorrect) analytics.totalCorrect++;
+    else if (isSkipped) analytics.totalSkipped++;
+    else analytics.totalIncorrect++;
+
+    analytics.totalStudyTimeSeconds += timeTakenSeconds || 0;
+    analytics.overallAccuracy = analytics.totalAttempted > 0
+      ? Math.round((analytics.totalCorrect / analytics.totalAttempted) * 100)
+      : 0;
+
+    analytics.avgResponseTimeSeconds = analytics.totalAttempted > 0
+      ? Math.round(analytics.totalStudyTimeSeconds / analytics.totalAttempted)
+      : 0;
+
+    // Streak logic, daily activity, etc. (simplified)
+    analytics.lastStudyDate = today;
+
+    await analytics.save();
+  } catch (err) {
+    console.error("Analytics update failed:", err.message);
+  }
+}
+
+// ====================== EXPRESS APP ======================
 const app = express();
-app.use(express.json());
+app.use(express.json({ limit: "10mb" }));
 app.use(express.urlencoded({ extended: true }));
 
 app.get("/health", (req, res) => {
-  res.status(200).json({ success: true, message: "Server is running" });
+  res.json({ success: true, message: "Server is running" });
 });
 
-// Example route to test getting questions from all collections
-app.get("/questions", async (req, res) => {
+// ====================== ROUTES ======================
+
+// Get Questions
+app.get("/questions", firebaseAuth, async (req, res) => {
   try {
-    const { limit = 10, collection = null } = req.query;
-    
-    let questions = [];
-    if (collection && collections[collection]) {
-      questions = await collections[collection].find().limit(Number(limit));
-    } else {
-      // Fetch from all three collections
-      const results = await Promise.all(
-        Object.values(collections).map(model => model.find().limit(Math.floor(Number(limit)/3)))
-      );
-      questions = results.flat();
-    }
+    const { collection = "pcsquestions", exam, subject, topic, year, limit = 20, skip = 0 } = req.query;
+
+    const query = {};
+    if (exam) query.exam = exam;
+    if (subject) query.subject = subject;
+    if (topic) query.topic = topic;
+    if (year) query.year = Number(year);
+
+    const model = getQuestionModel(collection);
+    const questions = await model.find(query)
+      .skip(Number(skip))
+      .limit(Number(limit))
+      .lean();
 
     res.json({ success: true, count: questions.length, questions });
   } catch (err) {
@@ -372,19 +408,177 @@ app.get("/questions", async (req, res) => {
   }
 });
 
-app.use(notFound);
-app.use(errorHandler);
+// Submit Attempt
+app.post("/attempt/submit", firebaseAuth, async (req, res) => {
+  try {
+    const { questionId, selectedOption, isCorrect, isSkipped, timeTakenSeconds, sessionId, questionMeta } = req.body;
 
+    await updateAnalyticsOnSubmit({
+      userId: req.userId,
+      questionId,
+      questionMeta: questionMeta || {},
+      selectedOption,
+      isCorrect: !!isCorrect,
+      isSkipped: !!isSkipped,
+      marksEarned: isCorrect ? (questionMeta?.marks || 2) : 0,
+      timeTakenSeconds: timeTakenSeconds || 0,
+      sessionId,
+    });
+
+    res.json({ success: true, message: "Attempt saved successfully" });
+  } catch (err) {
+    res.status(500).json({ success: false, message: err.message });
+  }
+});
+
+// Get User Profile
+app.get("/user/profile", firebaseAuth, async (req, res) => {
+  try {
+    const conn = getUserDB();
+    const User = getUserModel(conn);
+    const Analytics = getAnalyticsModel(conn);
+
+    const [user, analytics] = await Promise.all([
+      User.findOne({ userId: req.userId }),
+      Analytics.findOne({ userId: req.userId })
+    ]);
+
+    res.json({
+      success: true,
+      profile: user || { userId: req.userId },
+      analytics: analytics || {}
+    });
+  } catch (err) {
+    res.status(500).json({ success: false, message: err.message });
+  }
+});
+
+// Update User Profile
+app.patch("/user/profile", firebaseAuth, async (req, res) => {
+  try {
+    const conn = getUserDB();
+    const User = getUserModel(conn);
+
+    const user = await User.findOneAndUpdate(
+      { userId: req.userId },
+      { $set: req.body },
+      { new: true, upsert: true }
+    );
+
+    res.json({ success: true, user });
+  } catch (err) {
+    res.status(500).json({ success: false, message: err.message });
+  }
+});
+
+// Overall Rank
+app.get("/user/overall-rank", firebaseAuth, async (req, res) => {
+  try {
+    const conn = getUserDB();
+    const AttemptHistory = getAttemptHistoryModel(conn);
+
+    const userAttempts = await AttemptHistory.find({ userId: req.userId }).lean();
+
+    if (userAttempts.length === 0) {
+      return res.json({
+        success: true,
+        hasRank: false,
+        message: "Complete at least one test to see your rank.",
+        totalMarks: 0,
+        totalCorrect: 0,
+        attempts: 0,
+      });
+    }
+
+    let totalMarks = 0;
+    let totalCorrect = 0;
+
+    userAttempts.forEach(a => {
+      totalCorrect += a.isCorrect ? 1 : 0;
+      totalMarks += a.isCorrect ? (a.marksEarned || 2) : 0;
+    });
+
+    const betterUsers = await AttemptHistory.aggregate([
+      {
+        $group: {
+          _id: "$userId",
+          totalMarks: { $sum: { $cond: [{ $eq: ["$isCorrect", true] }, { $ifNull: ["$marksEarned", 2] }, 0] } }
+        }
+      },
+      { $match: { totalMarks: { $gt: totalMarks } } },
+      { $count: "count" }
+    ]);
+
+    const rank = (betterUsers[0]?.count || 0) + 1;
+    const totalParticipants = await AttemptHistory.distinct("userId").then(ids => new Set(ids).size);
+
+    res.json({
+      success: true,
+      hasRank: true,
+      rank,
+      totalMarks: Math.round(totalMarks * 100) / 100,
+      totalCorrect,
+      attempts: userAttempts.length,
+      totalParticipants,
+      percentile: totalParticipants > 0 ? Math.round(((totalParticipants - rank) / totalParticipants) * 100) : 0
+    });
+  } catch (err) {
+    res.status(500).json({ success: false, message: err.message });
+  }
+});
+
+// Global Leaderboard
+app.get("/leaderboard/global", async (req, res) => {
+  try {
+    const conn = getUserDB();
+    const AttemptHistory = getAttemptHistoryModel(conn);
+    const limit = parseInt(req.query.limit) || 50;
+
+    const leaderboard = await AttemptHistory.aggregate([
+      {
+        $group: {
+          _id: "$userId",
+          totalMarks: { $sum: { $cond: [{ $eq: ["$isCorrect", true] }, { $ifNull: ["$marksEarned", 2] }, 0] } },
+          totalCorrect: { $sum: { $cond: [{ $eq: ["$isCorrect", true] }, 1, 0] } },
+          attempts: { $sum: 1 }
+        }
+      },
+      { $sort: { totalMarks: -1 } },
+      { $limit: limit },
+      { $project: { userId: "$_id", totalMarks: 1, totalCorrect: 1, attempts: 1, rank: { $literal: 0 } } }
+    ]);
+
+    leaderboard.forEach((entry, i) => entry.rank = i + 1);
+
+    res.json({
+      success: true,
+      leaderboard,
+      totalParticipants: await AttemptHistory.distinct("userId").then(ids => new Set(ids).size)
+    });
+  } catch (err) {
+    res.status(500).json({ success: false, message: err.message });
+  }
+});
+
+app.use((req, res) => {
+  res.status(404).json({ success: false, message: "Route not found" });
+});
+
+app.use((err, req, res, next) => {
+  console.error(err);
+  res.status(500).json({ success: false, message: "Internal server error" });
+});
 const PORT = process.env.PORT || 8080;
 
 async function startServer() {
   try {
     await connectAllDatabases();
     app.listen(PORT, () => {
-      console.log(`Server running on port ${PORT}`);
+      console.log(`🚀 Server running on port ${PORT}`);
+      console.log(`📍 Deployed URL: https://prepswipe-backend-fbe2athsg2hjh0e7.southeastasia-01.azurewebsites.net`);
     });
   } catch (err) {
-    console.error("Failed to start server:", err.message);
+    console.error("❌ Failed to start server:", err.message);
     process.exit(1);
   }
 }
@@ -393,22 +587,13 @@ startServer();
 
 module.exports = {
   app,
-  connectQuestionDB,
-  connectUserDB,
+  firebaseAuth,
   connectAllDatabases,
   getQuestionDB,
   getUserDB,
   getQuestionModel,
-  getAllQuestionModels,
+  collections,
   getUserModel,
   getAnalyticsModel,
   getAttemptHistoryModel,
-  collections,
-  optionalAuth,
-  errorHandler,
-  notFound,
-  validate,
-  AppError,
-  todayIST,
-  // updateAnalyticsOnSubmit,  // Add if need it in future
 };
