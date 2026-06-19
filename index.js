@@ -61,6 +61,18 @@ async function connectQuestionDB() {
   questionConn.on("disconnected", () => console.warn("Question DB disconnected, reconnecting"));
 
   await questionConn.asPromise();
+
+  try {
+    const pingResult = await questionConn.db.admin().ping();
+    console.log("✅ Question DB ping ok:", JSON.stringify(pingResult));
+    console.log("📂 Question DB name:", questionConn.db.databaseName);
+    console.log("🌐 Question DB host:", questionConn.host);
+    const count = await questionConn.db.collection("pcsquestions").estimatedDocumentCount();
+    console.log("📊 pcsquestions estimated count:", count);
+  } catch (pingErr) {
+    console.error("❌ Question DB ping/diagnostic failed:", pingErr.message);
+  }
+
   return questionConn;
 }
 
@@ -416,6 +428,14 @@ app.get("/questions", firebaseAuth, async (req, res) => {
     if (year) query.year = Number(year);
 
     const model = getQuestionModel(collection);
+    const conn = getQuestionDB();
+    console.log("🔎 /questions debug:", JSON.stringify({
+      collection,
+      query,
+      readyState: conn.readyState,
+      dbName: conn.db?.databaseName,
+      host: conn.host,
+    }));
     const questions = await model.find(query)
       .skip(Number(skip))
       .limit(Number(limit))
