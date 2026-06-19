@@ -4,15 +4,14 @@ const mongoose = require("mongoose");
 const admin = require("firebase-admin");
 const cors = require("cors");
 
-// ====================== FIREBASE INITIALIZATION ======================
 if (!admin.apps.length) {
   try {
     const serviceAccount = JSON.parse(process.env.FIREBASE_SERVICE_ACCOUNT);
-   
+
     admin.initializeApp({
       credential: admin.credential.cert(serviceAccount),
     });
-   
+
     console.log("✅ Firebase Admin initialized successfully");
   } catch (error) {
     console.error("❌ Firebase initialization failed:", error.message);
@@ -20,7 +19,6 @@ if (!admin.apps.length) {
   }
 }
 
-// ====================== EXPRESS APP + CORS ======================
 const app = express();
 
 app.use(cors({
@@ -33,10 +31,12 @@ app.use(cors({
 app.use(express.json({ limit: "10mb" }));
 app.use(express.urlencoded({ extended: true }));
 
-// ====================== DB CONNECTION ======================
+mongoose.set("bufferCommands", true);
+mongoose.set("bufferTimeoutMS", 30000);
+
 const COMMON_OPTIONS = {
-  serverSelectionTimeoutMS: 15000,
-  connectTimeoutMS: 15000,
+  serverSelectionTimeoutMS: 30000,
+  connectTimeoutMS: 30000,
   socketTimeoutMS: 45000,
   maxPoolSize: 20,
   minPoolSize: 5,
@@ -50,15 +50,16 @@ async function connectQuestionDB() {
   if (questionConn && questionConn.readyState === 1) return questionConn;
   const uri = process.env.QUESTION_DB_URI;
   if (!uri) throw new Error("QUESTION_DB_URI is not defined in environment variables");
- 
+
   questionConn = mongoose.createConnection(uri, {
     ...COMMON_OPTIONS,
-    readPreference: "secondaryPreferred",
+    bufferCommands: true,
+    bufferTimeoutMS: 30000,
   });
   questionConn.on("connected", () => console.log("✅ Question DB connected"));
   questionConn.on("error", (err) => console.error("Question DB error:", err.message));
   questionConn.on("disconnected", () => console.warn("Question DB disconnected, reconnecting"));
- 
+
   await questionConn.asPromise();
   return questionConn;
 }
@@ -67,13 +68,17 @@ async function connectUserDB() {
   if (userConn && userConn.readyState === 1) return userConn;
   const uri = process.env.USER_DB_URI;
   if (!uri) throw new Error("USER_DB_URI is not defined in environment variables");
- 
-  userConn = mongoose.createConnection(uri, COMMON_OPTIONS);
- 
+
+  userConn = mongoose.createConnection(uri, {
+    ...COMMON_OPTIONS,
+    bufferCommands: true,
+    bufferTimeoutMS: 30000,
+  });
+
   userConn.on("connected", () => console.log("✅ User DB connected"));
   userConn.on("error", (err) => console.error("User DB error:", err.message));
   userConn.on("disconnected", () => console.warn("User DB disconnected, reconnecting"));
- 
+
   await userConn.asPromise();
   return userConn;
 }
@@ -97,7 +102,6 @@ function getUserDB() {
   return userConn;
 }
 
-// ====================== QUESTION SCHEMA ======================
 const QuestionSchema = new mongoose.Schema({
   _id: { type: Number },
   exam: { type: String, required: true },
@@ -120,21 +124,24 @@ const QuestionSchema = new mongoose.Schema({
   batchId: { type: String }
 }, { timestamps: true });
 
-const PcsQuestion = mongoose.model('PcsQuestion', QuestionSchema, 'pcsquestions');
-const BookQuestion = mongoose.model('BookQuestion', QuestionSchema, 'bookquestions');
-const ParagraphQuestion = mongoose.model('ParagraphQuestion', QuestionSchema, 'paragraphquestions');
-
-const collections = {
-  pcsquestions: PcsQuestion,
-  bookquestions: BookQuestion,
-  paragraphquestions: ParagraphQuestion
-};
-
 function getQuestionModel(collectionName = 'pcsquestions') {
-  return collections[collectionName] || PcsQuestion;
+  const conn = getQuestionDB();
+  const map = {
+    pcsquestions: 'PcsQuestion',
+    bookquestions: 'BookQuestion',
+    paragraphquestions: 'ParagraphQuestion',
+  };
+  const modelName = map[collectionName] || 'PcsQuestion';
+  if (conn.models[modelName]) return conn.models[modelName];
+  return conn.model(modelName, QuestionSchema, collectionName in map ? collectionName : 'pcsquestions');
 }
 
-// ====================== USER SCHEMA ======================
+const collections = {
+  pcsquestions: 'PcsQuestion',
+  bookquestions: 'BookQuestion',
+  paragraphquestions: 'ParagraphQuestion'
+};
+
 const UserSchema = new mongoose.Schema({
   userId: {
     type: String,
@@ -163,7 +170,6 @@ function getUserModel(connection) {
   return connection.model("User", UserSchema);
 }
 
-// ====================== ANALYTICS SCHEMAS ======================
 const AccuracyBreakdownSchema = new mongoose.Schema({
   key: { type: String, required: true },
   attempted: { type: Number, default: 0 },
@@ -253,7 +259,6 @@ function getAttemptHistoryModel(connection) {
   return connection.model("AttemptHistory", AttemptHistorySchema);
 }
 
-// ====================== FIREBASE AUTH MIDDLEWARE ======================
 const firebaseAuth = async (req, res, next) => {
   try {
     const authHeader = req.headers.authorization;
@@ -262,10 +267,10 @@ const firebaseAuth = async (req, res, next) => {
     }
     const idToken = authHeader.split("Bearer ")[1];
     const decodedToken = await admin.auth().verifyIdToken(idToken);
-   
+
     req.user = decodedToken;
     req.userId = decodedToken.uid;
-   
+
     next();
   } catch (error) {
     console.error("Firebase Auth Error:", error.message);
@@ -273,7 +278,6 @@ const firebaseAuth = async (req, res, next) => {
   }
 };
 
-// ====================== HELPER FUNCTIONS ======================
 const IST_OFFSET_MS = 5.5 * 60 * 60 * 1000;
 
 function todayIST() {
@@ -382,19 +386,16 @@ async function updateAnalyticsOnSubmit({
   }
 }
 
-// ====================== ROUTES ======================
 app.get("/health", (req, res) => {
   res.json({ success: true, message: "Server is running" });
 });
 
-// Get Questions - Now respects user's examType
 app.get("/questions", firebaseAuth, async (req, res) => {
   try {
     const { collection = "pcsquestions", exam, subject, topic, year, limit = 50, skip = 0 } = req.query;
-    
+
     const query = {};
-    
-    // Auto-detect exam from user's profile if not provided
+
     if (!exam) {
       try {
         const conn = getUserDB();
@@ -420,11 +421,11 @@ app.get("/questions", firebaseAuth, async (req, res) => {
       .limit(Number(limit))
       .lean();
 
-    res.json({ 
-      success: true, 
-      count: questions.length, 
+    res.json({
+      success: true,
+      count: questions.length,
       exam: query.exam || "all",
-      questions 
+      questions
     });
   } catch (err) {
     console.error("Questions route error:", err.message);
@@ -432,7 +433,6 @@ app.get("/questions", firebaseAuth, async (req, res) => {
   }
 });
 
-// Submit Attempt
 app.post("/attempt/submit", firebaseAuth, async (req, res) => {
   try {
     const { questionId, selectedOption, isCorrect, isSkipped, timeTakenSeconds, sessionId, questionMeta } = req.body;
@@ -453,7 +453,6 @@ app.post("/attempt/submit", firebaseAuth, async (req, res) => {
   }
 });
 
-// Get User Profile
 app.get("/user/profile", firebaseAuth, async (req, res) => {
   try {
     const conn = getUserDB();
@@ -473,7 +472,6 @@ app.get("/user/profile", firebaseAuth, async (req, res) => {
   }
 });
 
-// Update User Profile
 app.patch("/user/profile", firebaseAuth, async (req, res) => {
   try {
     const conn = getUserDB();
@@ -489,7 +487,6 @@ app.patch("/user/profile", firebaseAuth, async (req, res) => {
   }
 });
 
-// Overall Rank
 app.get("/user/overall-rank", firebaseAuth, async (req, res) => {
   try {
     const conn = getUserDB();
@@ -538,7 +535,6 @@ app.get("/user/overall-rank", firebaseAuth, async (req, res) => {
   }
 });
 
-// Global Leaderboard
 app.get("/leaderboard/global", async (req, res) => {
   try {
     const conn = getUserDB();
@@ -568,7 +564,6 @@ app.get("/leaderboard/global", async (req, res) => {
   }
 });
 
-// 404 & Error Handlers
 app.use((req, res) => {
   res.status(404).json({ success: false, message: "Route not found" });
 });
@@ -578,7 +573,6 @@ app.use((err, req, res, next) => {
   res.status(500).json({ success: false, message: "Internal server error" });
 });
 
-// ====================== START SERVER ======================
 const PORT = process.env.PORT || 8080;
 
 async function startServer() {
