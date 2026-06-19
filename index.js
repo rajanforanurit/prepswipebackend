@@ -2,22 +2,36 @@ require("dotenv").config();
 const express = require("express");
 const mongoose = require("mongoose");
 const admin = require("firebase-admin");
+const cors = require("cors");
 
 // ====================== FIREBASE INITIALIZATION ======================
 if (!admin.apps.length) {
   try {
     const serviceAccount = JSON.parse(process.env.FIREBASE_SERVICE_ACCOUNT);
-    
+   
     admin.initializeApp({
       credential: admin.credential.cert(serviceAccount),
     });
-    
+   
     console.log("✅ Firebase Admin initialized successfully");
   } catch (error) {
     console.error("❌ Firebase initialization failed:", error.message);
     console.error("Make sure FIREBASE_SERVICE_ACCOUNT is set correctly in environment variables");
   }
 }
+
+// ====================== EXPRESS APP + CORS ======================
+const app = express();
+
+app.use(cors({
+    origin: true,
+    credentials: true,
+    methods: ["GET", "POST", "PATCH", "PUT", "DELETE", "OPTIONS"],
+    allowedHeaders: ["Content-Type", "Authorization"]
+}));
+
+app.use(express.json({ limit: "10mb" }));
+app.use(express.urlencoded({ extended: true }));
 
 // ====================== DB CONNECTION ======================
 const COMMON_OPTIONS = {
@@ -36,16 +50,15 @@ async function connectQuestionDB() {
   if (questionConn && questionConn.readyState === 1) return questionConn;
   const uri = process.env.QUESTION_DB_URI;
   if (!uri) throw new Error("QUESTION_DB_URI is not defined in environment variables");
-  
+ 
   questionConn = mongoose.createConnection(uri, {
     ...COMMON_OPTIONS,
     readPreference: "secondaryPreferred",
   });
-
   questionConn.on("connected", () => console.log("✅ Question DB connected"));
   questionConn.on("error", (err) => console.error("Question DB error:", err.message));
   questionConn.on("disconnected", () => console.warn("Question DB disconnected, reconnecting"));
-  
+ 
   await questionConn.asPromise();
   return questionConn;
 }
@@ -54,13 +67,13 @@ async function connectUserDB() {
   if (userConn && userConn.readyState === 1) return userConn;
   const uri = process.env.USER_DB_URI;
   if (!uri) throw new Error("USER_DB_URI is not defined in environment variables");
-  
+ 
   userConn = mongoose.createConnection(uri, COMMON_OPTIONS);
-  
+ 
   userConn.on("connected", () => console.log("✅ User DB connected"));
   userConn.on("error", (err) => console.error("User DB error:", err.message));
   userConn.on("disconnected", () => console.warn("User DB disconnected, reconnecting"));
-  
+ 
   await userConn.asPromise();
   return userConn;
 }
@@ -247,13 +260,12 @@ const firebaseAuth = async (req, res, next) => {
     if (!authHeader || !authHeader.startsWith("Bearer ")) {
       return res.status(401).json({ success: false, message: "No token provided" });
     }
-
     const idToken = authHeader.split("Bearer ")[1];
     const decodedToken = await admin.auth().verifyIdToken(idToken);
-    
+   
     req.user = decodedToken;
     req.userId = decodedToken.uid;
-    
+   
     next();
   } catch (error) {
     console.error("Firebase Auth Error:", error.message);
@@ -325,10 +337,9 @@ async function updateAnalyticsOnSubmit({
   const Analytics = getAnalyticsModel(conn);
   const AttemptHistory = getAttemptHistoryModel(conn);
   const today = todayIST();
-
   try {
     await AttemptHistory.create({
-      userId: new mongoose.Types.ObjectId(userId), // Convert if needed
+      userId: new mongoose.Types.ObjectId(userId),
       questionId,
       exam: questionMeta?.exam,
       subject: questionMeta?.subject,
@@ -360,38 +371,45 @@ async function updateAnalyticsOnSubmit({
     analytics.overallAccuracy = analytics.totalAttempted > 0
       ? Math.round((analytics.totalCorrect / analytics.totalAttempted) * 100)
       : 0;
-
     analytics.avgResponseTimeSeconds = analytics.totalAttempted > 0
       ? Math.round(analytics.totalStudyTimeSeconds / analytics.totalAttempted)
       : 0;
 
-    // Streak logic, daily activity, etc. (simplified)
     analytics.lastStudyDate = today;
-
     await analytics.save();
   } catch (err) {
     console.error("Analytics update failed:", err.message);
   }
 }
 
-// ====================== EXPRESS APP ======================
-const app = express();
-app.use(express.json({ limit: "10mb" }));
-app.use(express.urlencoded({ extended: true }));
-
+// ====================== ROUTES ======================
 app.get("/health", (req, res) => {
   res.json({ success: true, message: "Server is running" });
 });
 
-// ====================== ROUTES ======================
-
-// Get Questions
+// Get Questions - Now respects user's examType
 app.get("/questions", firebaseAuth, async (req, res) => {
   try {
-    const { collection = "pcsquestions", exam, subject, topic, year, limit = 20, skip = 0 } = req.query;
-
+    const { collection = "pcsquestions", exam, subject, topic, year, limit = 50, skip = 0 } = req.query;
+    
     const query = {};
-    if (exam) query.exam = exam;
+    
+    // Auto-detect exam from user's profile if not provided
+    if (!exam) {
+      try {
+        const conn = getUserDB();
+        const User = getUserModel(conn);
+        const userProfile = await User.findOne({ userId: req.userId });
+        if (userProfile?.examType) {
+          query.exam = userProfile.examType;
+        }
+      } catch (e) {
+        console.warn("Could not fetch user examType");
+      }
+    } else {
+      query.exam = exam;
+    }
+
     if (subject) query.subject = subject;
     if (topic) query.topic = topic;
     if (year) query.year = Number(year);
@@ -402,8 +420,14 @@ app.get("/questions", firebaseAuth, async (req, res) => {
       .limit(Number(limit))
       .lean();
 
-    res.json({ success: true, count: questions.length, questions });
+    res.json({ 
+      success: true, 
+      count: questions.length, 
+      exam: query.exam || "all",
+      questions 
+    });
   } catch (err) {
+    console.error("Questions route error:", err.message);
     res.status(500).json({ success: false, message: err.message });
   }
 });
@@ -412,7 +436,6 @@ app.get("/questions", firebaseAuth, async (req, res) => {
 app.post("/attempt/submit", firebaseAuth, async (req, res) => {
   try {
     const { questionId, selectedOption, isCorrect, isSkipped, timeTakenSeconds, sessionId, questionMeta } = req.body;
-
     await updateAnalyticsOnSubmit({
       userId: req.userId,
       questionId,
@@ -424,7 +447,6 @@ app.post("/attempt/submit", firebaseAuth, async (req, res) => {
       timeTakenSeconds: timeTakenSeconds || 0,
       sessionId,
     });
-
     res.json({ success: true, message: "Attempt saved successfully" });
   } catch (err) {
     res.status(500).json({ success: false, message: err.message });
@@ -437,12 +459,10 @@ app.get("/user/profile", firebaseAuth, async (req, res) => {
     const conn = getUserDB();
     const User = getUserModel(conn);
     const Analytics = getAnalyticsModel(conn);
-
     const [user, analytics] = await Promise.all([
       User.findOne({ userId: req.userId }),
       Analytics.findOne({ userId: req.userId })
     ]);
-
     res.json({
       success: true,
       profile: user || { userId: req.userId },
@@ -458,13 +478,11 @@ app.patch("/user/profile", firebaseAuth, async (req, res) => {
   try {
     const conn = getUserDB();
     const User = getUserModel(conn);
-
     const user = await User.findOneAndUpdate(
       { userId: req.userId },
       { $set: req.body },
       { new: true, upsert: true }
     );
-
     res.json({ success: true, user });
   } catch (err) {
     res.status(500).json({ success: false, message: err.message });
@@ -476,9 +494,7 @@ app.get("/user/overall-rank", firebaseAuth, async (req, res) => {
   try {
     const conn = getUserDB();
     const AttemptHistory = getAttemptHistoryModel(conn);
-
     const userAttempts = await AttemptHistory.find({ userId: req.userId }).lean();
-
     if (userAttempts.length === 0) {
       return res.json({
         success: true,
@@ -489,15 +505,12 @@ app.get("/user/overall-rank", firebaseAuth, async (req, res) => {
         attempts: 0,
       });
     }
-
     let totalMarks = 0;
     let totalCorrect = 0;
-
     userAttempts.forEach(a => {
       totalCorrect += a.isCorrect ? 1 : 0;
       totalMarks += a.isCorrect ? (a.marksEarned || 2) : 0;
     });
-
     const betterUsers = await AttemptHistory.aggregate([
       {
         $group: {
@@ -508,10 +521,8 @@ app.get("/user/overall-rank", firebaseAuth, async (req, res) => {
       { $match: { totalMarks: { $gt: totalMarks } } },
       { $count: "count" }
     ]);
-
     const rank = (betterUsers[0]?.count || 0) + 1;
     const totalParticipants = await AttemptHistory.distinct("userId").then(ids => new Set(ids).size);
-
     res.json({
       success: true,
       hasRank: true,
@@ -533,7 +544,6 @@ app.get("/leaderboard/global", async (req, res) => {
     const conn = getUserDB();
     const AttemptHistory = getAttemptHistoryModel(conn);
     const limit = parseInt(req.query.limit) || 50;
-
     const leaderboard = await AttemptHistory.aggregate([
       {
         $group: {
@@ -547,9 +557,7 @@ app.get("/leaderboard/global", async (req, res) => {
       { $limit: limit },
       { $project: { userId: "$_id", totalMarks: 1, totalCorrect: 1, attempts: 1, rank: { $literal: 0 } } }
     ]);
-
     leaderboard.forEach((entry, i) => entry.rank = i + 1);
-
     res.json({
       success: true,
       leaderboard,
@@ -560,6 +568,7 @@ app.get("/leaderboard/global", async (req, res) => {
   }
 });
 
+// 404 & Error Handlers
 app.use((req, res) => {
   res.status(404).json({ success: false, message: "Route not found" });
 });
@@ -568,6 +577,8 @@ app.use((err, req, res, next) => {
   console.error(err);
   res.status(500).json({ success: false, message: "Internal server error" });
 });
+
+// ====================== START SERVER ======================
 const PORT = process.env.PORT || 8080;
 
 async function startServer() {
