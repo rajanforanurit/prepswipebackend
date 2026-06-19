@@ -22,10 +22,10 @@ if (!admin.apps.length) {
 const app = express();
 
 app.use(cors({
-    origin: true,
-    credentials: true,
-    methods: ["GET", "POST", "PATCH", "PUT", "DELETE", "OPTIONS"],
-    allowedHeaders: ["Content-Type", "Authorization"]
+  origin: true,
+  credentials: true,
+  methods: ["GET", "POST", "PATCH", "PUT", "DELETE", "OPTIONS"],
+  allowedHeaders: ["Content-Type", "Authorization"]
 }));
 
 app.use(express.json({ limit: "10mb" }));
@@ -114,6 +114,7 @@ function getUserDB() {
   return userConn;
 }
 
+// ====================== QUESTION SCHEMA ======================
 const QuestionSchema = new mongoose.Schema({
   _id: { type: Number },
   exam: { type: String, required: true },
@@ -136,24 +137,25 @@ const QuestionSchema = new mongoose.Schema({
   batchId: { type: String }
 }, { timestamps: true });
 
-function getQuestionModel(collectionName = 'pcsquestions') {
+function getQuestionModel(collectionName = "pcsquestions") {
   const conn = getQuestionDB();
   const map = {
-    pcsquestions: 'PcsQuestion',
-    bookquestions: 'BookQuestion',
-    paragraphquestions: 'ParagraphQuestion',
+    pcsquestions: "PcsQuestion",
+    bookquestions: "BookQuestion",
+    paragraphquestions: "ParagraphQuestion",
   };
-  const modelName = map[collectionName] || 'PcsQuestion';
+  const modelName = map[collectionName] || "PcsQuestion";
   if (conn.models[modelName]) return conn.models[modelName];
-  return conn.model(modelName, QuestionSchema, collectionName in map ? collectionName : 'pcsquestions');
+  return conn.model(modelName, QuestionSchema, collectionName in map ? collectionName : "pcsquestions");
 }
 
 const collections = {
-  pcsquestions: 'PcsQuestion',
-  bookquestions: 'BookQuestion',
-  paragraphquestions: 'ParagraphQuestion'
+  pcsquestions: "PcsQuestion",
+  bookquestions: "BookQuestion",
+  paragraphquestions: "ParagraphQuestion"
 };
 
+// ====================== USER SCHEMA ======================
 const UserSchema = new mongoose.Schema({
   userId: {
     type: String,
@@ -182,6 +184,7 @@ function getUserModel(connection) {
   return connection.model("User", UserSchema);
 }
 
+// ====================== ANALYTICS SCHEMAS ======================
 const AccuracyBreakdownSchema = new mongoose.Schema({
   key: { type: String, required: true },
   attempted: { type: Number, default: 0 },
@@ -199,8 +202,7 @@ const DailyEntrySchema = new mongoose.Schema({
 
 const AnalyticsSchema = new mongoose.Schema({
   userId: {
-    type: mongoose.Schema.Types.ObjectId,
-    ref: "User",
+    type: String,
     required: true,
     unique: true,
     index: true,
@@ -235,6 +237,17 @@ const AnalyticsSchema = new mongoose.Schema({
     attempted: { type: Number },
     _id: false,
   }],
+  recentSessions: [{
+    sessionId: { type: String },
+    score: { type: Number },
+    total: { type: Number },
+    correct: { type: Number },
+    incorrect: { type: Number },
+    accuracy: { type: Number },
+    timeTakenSeconds: { type: Number },
+    finishedAt: { type: Date },
+    _id: false,
+  }],
 }, { timestamps: true });
 
 function getAnalyticsModel(connection) {
@@ -244,8 +257,7 @@ function getAnalyticsModel(connection) {
 
 const AttemptHistorySchema = new mongoose.Schema({
   userId: {
-    type: mongoose.Schema.Types.ObjectId,
-    ref: "User",
+    type: String,
     required: true,
     index: true,
   },
@@ -266,11 +278,14 @@ const AttemptHistorySchema = new mongoose.Schema({
   attemptedAt: { type: Date, default: Date.now, index: true },
 }, { timestamps: false });
 
+AttemptHistorySchema.index({ userId: 1, questionId: 1 });
+
 function getAttemptHistoryModel(connection) {
   if (connection.models.AttemptHistory) return connection.models.AttemptHistory;
   return connection.model("AttemptHistory", AttemptHistorySchema);
 }
 
+// ====================== FIREBASE AUTH MIDDLEWARE ======================
 const firebaseAuth = async (req, res, next) => {
   try {
     const authHeader = req.headers.authorization;
@@ -290,6 +305,7 @@ const firebaseAuth = async (req, res, next) => {
   }
 };
 
+// ====================== HELPER FUNCTIONS ======================
 const IST_OFFSET_MS = 5.5 * 60 * 60 * 1000;
 
 function todayIST() {
@@ -338,6 +354,19 @@ function computeStrongWeak(subjectAccuracy) {
   return { strongSubjects, weakSubjects };
 }
 
+function updateStreak(analytics, today, yesterday) {
+  if (analytics.lastStudyDate === today) {
+    // already studied today, streak unchanged
+  } else if (analytics.lastStudyDate === yesterday) {
+    analytics.currentStreak = (analytics.currentStreak || 0) + 1;
+  } else {
+    analytics.currentStreak = 1;
+  }
+  if (analytics.currentStreak > (analytics.longestStreak || 0)) {
+    analytics.longestStreak = analytics.currentStreak;
+  }
+}
+
 async function updateAnalyticsOnSubmit({
   userId,
   questionId,
@@ -353,55 +382,95 @@ async function updateAnalyticsOnSubmit({
   const Analytics = getAnalyticsModel(conn);
   const AttemptHistory = getAttemptHistoryModel(conn);
   const today = todayIST();
-  try {
-    await AttemptHistory.create({
-      userId: new mongoose.Types.ObjectId(userId),
-      questionId,
-      exam: questionMeta?.exam,
-      subject: questionMeta?.subject,
-      topic: questionMeta?.topic,
-      subtopic: questionMeta?.subtopic,
-      paper: questionMeta?.paper,
-      year: questionMeta?.year,
-      difficulty: questionMeta?.difficulty,
-      selectedOption,
-      isCorrect,
-      isSkipped: isSkipped || false,
-      marksEarned,
-      timeTakenSeconds: timeTakenSeconds || 0,
-      sessionId,
-      attemptedAt: new Date(),
-    });
+  const yesterday = yesterdayIST();
 
-    let analytics = await Analytics.findOne({ userId });
-    if (!analytics) {
-      analytics = new Analytics({ userId });
-    }
+  await AttemptHistory.create({
+    userId,
+    questionId,
+    exam: questionMeta?.exam,
+    subject: questionMeta?.subject,
+    topic: questionMeta?.topic,
+    subtopic: questionMeta?.subtopic,
+    paper: questionMeta?.paper,
+    year: questionMeta?.year,
+    difficulty: questionMeta?.difficulty,
+    selectedOption,
+    isCorrect,
+    isSkipped: isSkipped || false,
+    marksEarned,
+    timeTakenSeconds: timeTakenSeconds || 0,
+    sessionId,
+    attemptedAt: new Date(),
+  });
 
-    analytics.totalAttempted++;
-    if (isCorrect) analytics.totalCorrect++;
-    else if (isSkipped) analytics.totalSkipped++;
-    else analytics.totalIncorrect++;
-
-    analytics.totalStudyTimeSeconds += timeTakenSeconds || 0;
-    analytics.overallAccuracy = analytics.totalAttempted > 0
-      ? Math.round((analytics.totalCorrect / analytics.totalAttempted) * 100)
-      : 0;
-    analytics.avgResponseTimeSeconds = analytics.totalAttempted > 0
-      ? Math.round(analytics.totalStudyTimeSeconds / analytics.totalAttempted)
-      : 0;
-
-    analytics.lastStudyDate = today;
-    await analytics.save();
-  } catch (err) {
-    console.error("Analytics update failed:", err.message);
+  let analytics = await Analytics.findOne({ userId });
+  if (!analytics) {
+    analytics = new Analytics({ userId });
   }
+
+  analytics.totalAttempted++;
+  if (isSkipped) analytics.totalSkipped++;
+  else if (isCorrect) analytics.totalCorrect++;
+  else analytics.totalIncorrect++;
+
+  analytics.totalStudyTimeSeconds += timeTakenSeconds || 0;
+  analytics.overallAccuracy = analytics.totalAttempted > 0
+    ? Math.round((analytics.totalCorrect / analytics.totalAttempted) * 100)
+    : 0;
+  analytics.avgResponseTimeSeconds = analytics.totalAttempted > 0
+    ? Math.round(analytics.totalStudyTimeSeconds / analytics.totalAttempted)
+    : 0;
+
+  if (questionMeta?.subject) {
+    updateBreakdown(analytics.subjectAccuracy, questionMeta.subject, isCorrect);
+  }
+  if (questionMeta?.topic) {
+    updateBreakdown(analytics.topicAccuracy, questionMeta.topic, isCorrect);
+  }
+  if (questionMeta?.year) {
+    updateBreakdown(analytics.yearAccuracy, String(questionMeta.year), isCorrect);
+  }
+
+  const { strongSubjects, weakSubjects } = computeStrongWeak(analytics.subjectAccuracy);
+  analytics.strongSubjects = strongSubjects;
+  analytics.weakSubjects = weakSubjects;
+
+  if (analytics.goalResetDate !== today) {
+    analytics.todayAttempted = 0;
+    analytics.goalResetDate = today;
+  }
+  analytics.todayAttempted = (analytics.todayAttempted || 0) + 1;
+
+  updateStreak(analytics, today, yesterday);
+  analytics.lastStudyDate = today;
+
+  const dayEntry = analytics.dailyActivity.find((d) => d.date === today);
+  if (dayEntry) {
+    dayEntry.attempted++;
+    if (isCorrect) dayEntry.correct++;
+    dayEntry.timeSpentSeconds += timeTakenSeconds || 0;
+  } else {
+    analytics.dailyActivity.push({
+      date: today,
+      attempted: 1,
+      correct: isCorrect ? 1 : 0,
+      timeSpentSeconds: timeTakenSeconds || 0,
+    });
+  }
+  if (analytics.dailyActivity.length > 90) {
+    analytics.dailyActivity = analytics.dailyActivity.slice(-90);
+  }
+
+  await analytics.save();
+  return analytics;
 }
 
+// ====================== ROUTES ======================
 app.get("/health", (req, res) => {
   res.json({ success: true, message: "Server is running" });
 });
 
+// Get Questions (legacy, sequential/filtered)
 app.get("/questions", firebaseAuth, async (req, res) => {
   try {
     const { collection = "pcsquestions", exam, subject, topic, year, limit = 50, skip = 0 } = req.query;
@@ -428,14 +497,6 @@ app.get("/questions", firebaseAuth, async (req, res) => {
     if (year) query.year = Number(year);
 
     const model = getQuestionModel(collection);
-    const conn = getQuestionDB();
-    console.log("🔎 /questions debug:", JSON.stringify({
-      collection,
-      query,
-      readyState: conn.readyState,
-      dbName: conn.db?.databaseName,
-      host: conn.host,
-    }));
     const questions = await model.find(query)
       .skip(Number(skip))
       .limit(Number(limit))
@@ -453,6 +514,86 @@ app.get("/questions", firebaseAuth, async (req, res) => {
   }
 });
 
+// Get Random Questions - excludes already-attempted questions for this user, falls back to allowing repeats if pool exhausted
+app.get("/questions/random", firebaseAuth, async (req, res) => {
+  try {
+    const { collection = "pcsquestions", exam, subject, topic, year, count = 10 } = req.query;
+    const numCount = Math.max(1, Math.min(Number(count) || 10, 100));
+
+    const query = {};
+
+    if (!exam) {
+      try {
+        const userConnLocal = getUserDB();
+        const User = getUserModel(userConnLocal);
+        const userProfile = await User.findOne({ userId: req.userId });
+        if (userProfile?.examType) {
+          query.exam = userProfile.examType;
+        }
+      } catch (e) {
+        console.warn("Could not fetch user examType");
+      }
+    } else {
+      query.exam = exam;
+    }
+
+    if (subject) query.subject = subject;
+    if (topic) query.topic = topic;
+    if (year) query.year = Number(year);
+
+    let attemptedIds = [];
+    try {
+      const conn = getUserDB();
+      const AttemptHistory = getAttemptHistoryModel(conn);
+      const attemptedDocs = await AttemptHistory.find({ userId: req.userId }, { questionId: 1 }).lean();
+      attemptedIds = attemptedDocs.map((d) => d.questionId);
+    } catch (e) {
+      console.warn("Could not fetch attempted question ids:", e.message);
+    }
+
+    const model = getQuestionModel(collection);
+
+    const baseMatch = { ...query };
+    let excludeMatch = { ...baseMatch };
+    if (attemptedIds.length > 0) {
+      excludeMatch._id = { $nin: attemptedIds };
+    }
+
+    let questions = await model.aggregate([
+      { $match: excludeMatch },
+      { $sample: { size: numCount } },
+    ]);
+
+    let usedFallback = false;
+    if (questions.length < numCount) {
+      usedFallback = true;
+      const stillNeeded = numCount - questions.length;
+      const alreadyPickedIds = questions.map((q) => q._id);
+      const fallbackMatch = { ...baseMatch };
+      if (alreadyPickedIds.length > 0) {
+        fallbackMatch._id = { $nin: alreadyPickedIds };
+      }
+      const fallbackQuestions = await model.aggregate([
+        { $match: fallbackMatch },
+        { $sample: { size: stillNeeded } },
+      ]);
+      questions = [...questions, ...fallbackQuestions];
+    }
+
+    res.json({
+      success: true,
+      count: questions.length,
+      exam: query.exam || "all",
+      exhaustedPool: usedFallback,
+      questions,
+    });
+  } catch (err) {
+    console.error("Random questions route error:", err.message);
+    res.status(500).json({ success: false, message: err.message });
+  }
+});
+
+// Submit single attempt (kept for backward compatibility / instant feedback logging)
 app.post("/attempt/submit", firebaseAuth, async (req, res) => {
   try {
     const { questionId, selectedOption, isCorrect, isSkipped, timeTakenSeconds, sessionId, questionMeta } = req.body;
@@ -473,6 +614,106 @@ app.post("/attempt/submit", firebaseAuth, async (req, res) => {
   }
 });
 
+// Finish a full test session in one batch call - saves all attempts and returns a results summary
+app.post("/test/finish", firebaseAuth, async (req, res) => {
+  try {
+    const { sessionId, attempts } = req.body;
+    if (!Array.isArray(attempts) || attempts.length === 0) {
+      return res.status(400).json({ success: false, message: "attempts array is required" });
+    }
+
+    const finalSessionId = sessionId || `session-${Date.now()}`;
+    let correct = 0;
+    let incorrect = 0;
+    let skipped = 0;
+    let totalMarks = 0;
+    let totalTimeSeconds = 0;
+    const subjectTally = {};
+
+    for (const a of attempts) {
+      const isCorrect = !!a.isCorrect;
+      const isSkipped = !!a.isSkipped;
+      const marksEarned = isCorrect ? (a.questionMeta?.marks || 2) : (isSkipped ? 0 : -(a.questionMeta?.negativeMarks || 0));
+
+      await updateAnalyticsOnSubmit({
+        userId: req.userId,
+        questionId: a.questionId,
+        questionMeta: a.questionMeta || {},
+        selectedOption: a.selectedOption,
+        isCorrect,
+        isSkipped,
+        marksEarned,
+        timeTakenSeconds: a.timeTakenSeconds || 0,
+        sessionId: finalSessionId,
+      });
+
+      if (isSkipped) skipped++;
+      else if (isCorrect) correct++;
+      else incorrect++;
+
+      totalMarks += marksEarned;
+      totalTimeSeconds += a.timeTakenSeconds || 0;
+
+      const subj = a.questionMeta?.subject || "General";
+      if (!subjectTally[subj]) subjectTally[subj] = { attempted: 0, correct: 0 };
+      subjectTally[subj].attempted++;
+      if (isCorrect) subjectTally[subj].correct++;
+    }
+
+    const total = attempts.length;
+    const accuracy = total > 0 ? Math.round((correct / total) * 100) : 0;
+
+    const subjectBreakdown = Object.entries(subjectTally).map(([subject, v]) => ({
+      subject,
+      attempted: v.attempted,
+      correct: v.correct,
+      accuracy: v.attempted > 0 ? Math.round((v.correct / v.attempted) * 100) : 0,
+    }));
+
+    try {
+      const conn = getUserDB();
+      const Analytics = getAnalyticsModel(conn);
+      const analytics = await Analytics.findOne({ userId: req.userId });
+      if (analytics) {
+        analytics.recentSessions = analytics.recentSessions || [];
+        analytics.recentSessions.unshift({
+          sessionId: finalSessionId,
+          score: Math.round(totalMarks * 100) / 100,
+          total,
+          correct,
+          incorrect,
+          accuracy,
+          timeTakenSeconds: totalTimeSeconds,
+          finishedAt: new Date(),
+        });
+        analytics.recentSessions = analytics.recentSessions.slice(0, 20);
+        await analytics.save();
+      }
+    } catch (e) {
+      console.warn("Could not save recent session:", e.message);
+    }
+
+    res.json({
+      success: true,
+      sessionId: finalSessionId,
+      result: {
+        total,
+        correct,
+        incorrect,
+        skipped,
+        accuracy,
+        totalMarks: Math.round(totalMarks * 100) / 100,
+        timeTakenSeconds: totalTimeSeconds,
+        subjectBreakdown,
+      },
+    });
+  } catch (err) {
+    console.error("Test finish route error:", err.message);
+    res.status(500).json({ success: false, message: err.message });
+  }
+});
+
+// Get User Profile (with analytics)
 app.get("/user/profile", firebaseAuth, async (req, res) => {
   try {
     const conn = getUserDB();
@@ -485,13 +726,23 @@ app.get("/user/profile", firebaseAuth, async (req, res) => {
     res.json({
       success: true,
       profile: user || { userId: req.userId },
-      analytics: analytics || {}
+      analytics: analytics || {
+        totalAttempted: 0,
+        totalCorrect: 0,
+        totalIncorrect: 0,
+        overallAccuracy: 0,
+        currentStreak: 0,
+        longestStreak: 0,
+        subjectAccuracy: [],
+        recentSessions: [],
+      }
     });
   } catch (err) {
     res.status(500).json({ success: false, message: err.message });
   }
 });
 
+// Update User Profile
 app.patch("/user/profile", firebaseAuth, async (req, res) => {
   try {
     const conn = getUserDB();
@@ -507,6 +758,7 @@ app.patch("/user/profile", firebaseAuth, async (req, res) => {
   }
 });
 
+// Overall Rank
 app.get("/user/overall-rank", firebaseAuth, async (req, res) => {
   try {
     const conn = getUserDB();
@@ -555,6 +807,7 @@ app.get("/user/overall-rank", firebaseAuth, async (req, res) => {
   }
 });
 
+// Global Leaderboard
 app.get("/leaderboard/global", async (req, res) => {
   try {
     const conn = getUserDB();
@@ -584,6 +837,7 @@ app.get("/leaderboard/global", async (req, res) => {
   }
 });
 
+// 404 & Error Handlers
 app.use((req, res) => {
   res.status(404).json({ success: false, message: "Route not found" });
 });
@@ -593,6 +847,7 @@ app.use((err, req, res, next) => {
   res.status(500).json({ success: false, message: "Internal server error" });
 });
 
+// ====================== START SERVER ======================
 const PORT = process.env.PORT || 8080;
 
 async function startServer() {
