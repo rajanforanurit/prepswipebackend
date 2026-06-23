@@ -7,16 +7,10 @@ const cors = require("cors");
 if (!admin.apps.length) {
   try {
     const serviceAccount = JSON.parse(process.env.FIREBASE_SERVICE_ACCOUNT);
-
     admin.initializeApp({
       credential: admin.credential.cert(serviceAccount),
     });
-
-    console.log("✅ Firebase Admin initialized successfully");
-  } catch (error) {
-    console.error("❌ Firebase initialization failed:", error.message);
-    console.error("Make sure FIREBASE_SERVICE_ACCOUNT is set correctly in environment variables");
-  }
+  } catch (error) {}
 }
 
 const app = express();
@@ -45,7 +39,6 @@ const COMMON_OPTIONS = {
 
 let questionConn = null;
 let userConn = null;
-
 async function connectQuestionDB() {
   if (questionConn && questionConn.readyState === 1) return questionConn;
   const uri = process.env.QUESTION_DB_URI;
@@ -56,26 +49,13 @@ async function connectQuestionDB() {
     bufferCommands: true,
     bufferTimeoutMS: 30000,
   });
-  questionConn.on("connected", () => console.log("✅ Question DB connected"));
-  questionConn.on("error", (err) => console.error("Question DB error:", err.message));
-  questionConn.on("disconnected", () => console.warn("Question DB disconnected, reconnecting"));
+  questionConn.on("error", () => {});
+  questionConn.on("disconnected", () => {});
 
   await questionConn.asPromise();
 
-  try {
-    const pingResult = await questionConn.db.admin().ping();
-    console.log("✅ Question DB ping ok:", JSON.stringify(pingResult));
-    console.log("📂 Question DB name:", questionConn.db.databaseName);
-    console.log("🌐 Question DB host:", questionConn.host);
-    const count = await questionConn.db.collection("pcsquestions").estimatedDocumentCount();
-    console.log("📊 pcsquestions estimated count:", count);
-  } catch (pingErr) {
-    console.error("❌ Question DB ping/diagnostic failed:", pingErr.message);
-  }
-
   return questionConn;
 }
-
 async function connectUserDB() {
   if (userConn && userConn.readyState === 1) return userConn;
   const uri = process.env.USER_DB_URI;
@@ -87,34 +67,27 @@ async function connectUserDB() {
     bufferTimeoutMS: 30000,
   });
 
-  userConn.on("connected", () => console.log("✅ User DB connected"));
-  userConn.on("error", (err) => console.error("User DB error:", err.message));
-  userConn.on("disconnected", () => console.warn("User DB disconnected, reconnecting"));
+  userConn.on("error", () => {});
+  userConn.on("disconnected", () => {});
 
   await userConn.asPromise();
   return userConn;
 }
-
 async function connectAllDatabases() {
   await Promise.all([connectQuestionDB(), connectUserDB()]);
-  console.log("✅ Both database clusters connected");
 }
-
 function getQuestionDB() {
   if (!questionConn || questionConn.readyState !== 1) {
     throw new Error("Question DB not connected");
   }
   return questionConn;
 }
-
 function getUserDB() {
   if (!userConn || userConn.readyState !== 1) {
     throw new Error("User DB not connected");
   }
   return userConn;
 }
-
-// ====================== QUESTION SCHEMA ======================
 const QuestionSchema = new mongoose.Schema({
   _id: { type: Number },
   exam: { type: String, required: true },
@@ -155,7 +128,8 @@ const collections = {
   paragraphquestions: "ParagraphQuestion"
 };
 
-// ====================== USER SCHEMA ======================
+const USERID_REGEX = /^[a-z0-9_]{4,20}$/;
+
 const UserSchema = new mongoose.Schema({
   userId: {
     type: String,
@@ -165,6 +139,28 @@ const UserSchema = new mongoose.Schema({
     lowercase: true,
     index: true,
   },
+  userID: {
+    type: String,
+    unique: true,
+    sparse: true,
+    trim: true,
+    lowercase: true,
+    minlength: 4,
+    maxlength: 20,
+    match: USERID_REGEX,
+    index: true,
+  },
+  name: {
+    type: String,
+    trim: true,
+    default: null,
+  },
+  email: {
+    type: String,
+    trim: true,
+    lowercase: true,
+    default: null,
+  },
   examType: {
     type: String,
     enum: [
@@ -172,8 +168,7 @@ const UserSchema = new mongoose.Schema({
       "HPSC", "WBPCS", "OPSC", "KPSC", "TNPSC",
       "SSC CGL", "SSC CHSL", "SSC MTS", "SSC CPO",
       "IBPS PO", "IBPS CLERK", "SBI PO", "SBI CLERK", "RBI GRADE B",
-      "RRB NTPC", "RRB GROUP D", "RRB ALP",
-      "NDA", "CDS", "AFCAT", "CAPF", "OTHER"
+      "RRB NTPC", "RRB GROUP D"
     ],
     index: true,
   },
@@ -183,8 +178,21 @@ function getUserModel(connection) {
   if (connection.models.User) return connection.models.User;
   return connection.model("User", UserSchema);
 }
-
-// ====================== ANALYTICS SCHEMAS ======================
+function generateUserIDSuggestions(base) {
+  const clean = String(base).toLowerCase().replace(/[^a-z0-9_]/g, "").slice(0, 15) || "user";
+  const suggestions = [];
+  for (let i = 0; i < 3; i++) {
+    const suffix = Math.floor(10 + Math.random() * 89890);
+    suggestions.push(`${clean}${suffix}`.slice(0, 20));
+  }
+  return suggestions;
+}
+async function isUserIDAvailable(User, userID, excludeFirebaseUID) {
+  const query = { userID };
+  if (excludeFirebaseUID) query.userId = { $ne: excludeFirebaseUID };
+  const existing = await User.findOne(query).lean();
+  return !existing;
+}
 const AccuracyBreakdownSchema = new mongoose.Schema({
   key: { type: String, required: true },
   attempted: { type: Number, default: 0 },
@@ -254,7 +262,6 @@ function getAnalyticsModel(connection) {
   if (connection.models.Analytics) return connection.models.Analytics;
   return connection.model("Analytics", AnalyticsSchema);
 }
-
 const AttemptHistorySchema = new mongoose.Schema({
   userId: {
     type: String,
@@ -279,13 +286,11 @@ const AttemptHistorySchema = new mongoose.Schema({
 }, { timestamps: false });
 
 AttemptHistorySchema.index({ userId: 1, questionId: 1 });
-
 function getAttemptHistoryModel(connection) {
   if (connection.models.AttemptHistory) return connection.models.AttemptHistory;
   return connection.model("AttemptHistory", AttemptHistorySchema);
 }
 
-// ====================== FIREBASE AUTH MIDDLEWARE ======================
 const firebaseAuth = async (req, res, next) => {
   try {
     const authHeader = req.headers.authorization;
@@ -300,12 +305,10 @@ const firebaseAuth = async (req, res, next) => {
 
     next();
   } catch (error) {
-    console.error("Firebase Auth Error:", error.message);
     return res.status(401).json({ success: false, message: "Invalid or expired token" });
   }
 };
 
-// ====================== HELPER FUNCTIONS ======================
 const IST_OFFSET_MS = 5.5 * 60 * 60 * 1000;
 
 function todayIST() {
@@ -324,6 +327,15 @@ function yesterdayIST() {
     String(ist.getUTCMonth() + 1).padStart(2, "0"),
     String(ist.getUTCDate()).padStart(2, "0")
   ].join("-");
+}
+
+function escapeRegex(str) {
+  return String(str).replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+}
+
+function buildExamMatch(examType) {
+  const keyword = String(examType).trim();
+  return { $regex: new RegExp("^" + escapeRegex(keyword) + "(\\s|$)", "i") };
 }
 
 function updateBreakdown(array, key, isCorrect) {
@@ -356,7 +368,6 @@ function computeStrongWeak(subjectAccuracy) {
 
 function updateStreak(analytics, today, yesterday) {
   if (analytics.lastStudyDate === today) {
-    // already studied today, streak unchanged
   } else if (analytics.lastStudyDate === yesterday) {
     analytics.currentStreak = (analytics.currentStreak || 0) + 1;
   } else {
@@ -465,17 +476,132 @@ async function updateAnalyticsOnSubmit({
   return analytics;
 }
 
-// ====================== ROUTES ======================
 app.get("/health", (req, res) => {
   res.json({ success: true, message: "Server is running" });
 });
 
-// Get Questions (legacy, sequential/filtered)
+app.get("/user/check-userid", firebaseAuth, async (req, res) => {
+  try {
+    const requested = String(req.query.userID || "").trim().toLowerCase();
+    if (!USERID_REGEX.test(requested)) {
+      return res.status(400).json({
+        success: false,
+        available: false,
+        message: "userID must be 4-20 characters, lowercase letters, numbers, and underscore only",
+      });
+    }
+    const conn = getUserDB();
+    const User = getUserModel(conn);
+    const available = await isUserIDAvailable(User, requested, req.userId);
+    if (available) {
+      return res.json({ success: true, available: true });
+    }
+    res.json({
+      success: true,
+      available: false,
+      suggestions: generateUserIDSuggestions(requested),
+    });
+  } catch (err) {
+    res.status(500).json({ success: false, message: err.message });
+  }
+});
+
+app.post("/profile", firebaseAuth, async (req, res) => {
+  try {
+    const { userID, name, examType, email } = req.body;
+    const requested = String(userID || "").trim().toLowerCase();
+
+    if (!USERID_REGEX.test(requested)) {
+      return res.status(400).json({
+        success: false,
+        message: "userID must be 4-20 characters, lowercase letters, numbers, and underscore only",
+      });
+    }
+
+    const conn = getUserDB();
+    const User = getUserModel(conn);
+
+    const existingByUid = await User.findOne({ userId: req.userId });
+    if (existingByUid?.userID) {
+      return res.status(409).json({
+        success: false,
+        message: "Profile already exists for this account",
+        user: existingByUid,
+      });
+    }
+
+    const available = await isUserIDAvailable(User, requested, req.userId);
+    if (!available) {
+      return res.status(409).json({
+        success: false,
+        message: "userID is already taken",
+        suggestions: generateUserIDSuggestions(requested),
+      });
+    }
+
+    const update = { userID: requested };
+    if (name) update.name = name;
+    if (email) update.email = String(email).trim().toLowerCase();
+    if (examType) update.examType = examType;
+
+    const user = await User.findOneAndUpdate(
+      { userId: req.userId },
+      { $set: update },
+      { new: true, upsert: true }
+    );
+
+    res.json({ success: true, user });
+  } catch (err) {
+    if (err?.code === 11000) {
+      return res.status(409).json({ success: false, message: "userID is already taken" });
+    }
+    res.status(500).json({ success: false, message: err.message });
+  }
+});
+
+app.patch("/user/userid", firebaseAuth, async (req, res) => {
+  try {
+    const requested = String(req.body.userID || "").trim().toLowerCase();
+    if (!USERID_REGEX.test(requested)) {
+      return res.status(400).json({
+        success: false,
+        message: "userID must be 4-20 characters, lowercase letters, numbers, and underscore only",
+      });
+    }
+
+    const conn = getUserDB();
+    const User = getUserModel(conn);
+
+    const available = await isUserIDAvailable(User, requested, req.userId);
+    if (!available) {
+      return res.status(409).json({
+        success: false,
+        message: "userID is already taken",
+        suggestions: generateUserIDSuggestions(requested),
+      });
+    }
+
+    const user = await User.findOneAndUpdate(
+      { userId: req.userId },
+      { $set: { userID: requested } },
+      { new: true, upsert: true }
+    );
+
+    res.json({ success: true, user });
+  } catch (err) {
+    if (err?.code === 11000) {
+      return res.status(409).json({ success: false, message: "userID is already taken" });
+    }
+    res.status(500).json({ success: false, message: err.message });
+  }
+});
+
 app.get("/questions", firebaseAuth, async (req, res) => {
   try {
     const { collection = "pcsquestions", exam, subject, topic, year, limit = 50, skip = 0 } = req.query;
 
     const query = {};
+    let examLabel = "all";
 
     if (!exam) {
       try {
@@ -483,13 +609,13 @@ app.get("/questions", firebaseAuth, async (req, res) => {
         const User = getUserModel(conn);
         const userProfile = await User.findOne({ userId: req.userId });
         if (userProfile?.examType) {
-          query.exam = userProfile.examType;
+          query.exam = buildExamMatch(userProfile.examType);
+          examLabel = userProfile.examType;
         }
-      } catch (e) {
-        console.warn("Could not fetch user examType");
-      }
+      } catch (e) {}
     } else {
-      query.exam = exam;
+      query.exam = buildExamMatch(exam);
+      examLabel = exam;
     }
 
     if (subject) query.subject = subject;
@@ -505,22 +631,21 @@ app.get("/questions", firebaseAuth, async (req, res) => {
     res.json({
       success: true,
       count: questions.length,
-      exam: query.exam || "all",
+      exam: examLabel,
       questions
     });
   } catch (err) {
-    console.error("Questions route error:", err.message);
     res.status(500).json({ success: false, message: err.message });
   }
 });
 
-// Get Random Questions - excludes already-attempted questions for this user, falls back to allowing repeats if pool exhausted
 app.get("/questions/random", firebaseAuth, async (req, res) => {
   try {
     const { collection = "pcsquestions", exam, subject, topic, year, count = 10 } = req.query;
     const numCount = Math.max(1, Math.min(Number(count) || 10, 100));
 
     const query = {};
+    let examLabel = "all";
 
     if (!exam) {
       try {
@@ -528,13 +653,13 @@ app.get("/questions/random", firebaseAuth, async (req, res) => {
         const User = getUserModel(userConnLocal);
         const userProfile = await User.findOne({ userId: req.userId });
         if (userProfile?.examType) {
-          query.exam = userProfile.examType;
+          query.exam = buildExamMatch(userProfile.examType);
+          examLabel = userProfile.examType;
         }
-      } catch (e) {
-        console.warn("Could not fetch user examType");
-      }
+      } catch (e) {}
     } else {
-      query.exam = exam;
+      query.exam = buildExamMatch(exam);
+      examLabel = exam;
     }
 
     if (subject) query.subject = subject;
@@ -547,9 +672,7 @@ app.get("/questions/random", firebaseAuth, async (req, res) => {
       const AttemptHistory = getAttemptHistoryModel(conn);
       const attemptedDocs = await AttemptHistory.find({ userId: req.userId }, { questionId: 1 }).lean();
       attemptedIds = attemptedDocs.map((d) => d.questionId);
-    } catch (e) {
-      console.warn("Could not fetch attempted question ids:", e.message);
-    }
+    } catch (e) {}
 
     const model = getQuestionModel(collection);
 
@@ -583,17 +706,15 @@ app.get("/questions/random", firebaseAuth, async (req, res) => {
     res.json({
       success: true,
       count: questions.length,
-      exam: query.exam || "all",
+      exam: examLabel,
       exhaustedPool: usedFallback,
       questions,
     });
   } catch (err) {
-    console.error("Random questions route error:", err.message);
     res.status(500).json({ success: false, message: err.message });
   }
 });
 
-// Submit single attempt (kept for backward compatibility / instant feedback logging)
 app.post("/attempt/submit", firebaseAuth, async (req, res) => {
   try {
     const { questionId, selectedOption, isCorrect, isSkipped, timeTakenSeconds, sessionId, questionMeta } = req.body;
@@ -614,7 +735,6 @@ app.post("/attempt/submit", firebaseAuth, async (req, res) => {
   }
 });
 
-// Finish a full test session in one batch call - saves all attempts and returns a results summary
 app.post("/test/finish", firebaseAuth, async (req, res) => {
   try {
     const { sessionId, attempts } = req.body;
@@ -689,9 +809,7 @@ app.post("/test/finish", firebaseAuth, async (req, res) => {
         analytics.recentSessions = analytics.recentSessions.slice(0, 20);
         await analytics.save();
       }
-    } catch (e) {
-      console.warn("Could not save recent session:", e.message);
-    }
+    } catch (e) {}
 
     res.json({
       success: true,
@@ -708,12 +826,9 @@ app.post("/test/finish", firebaseAuth, async (req, res) => {
       },
     });
   } catch (err) {
-    console.error("Test finish route error:", err.message);
     res.status(500).json({ success: false, message: err.message });
   }
 });
-
-// Get User Profile (with analytics)
 app.get("/user/profile", firebaseAuth, async (req, res) => {
   try {
     const conn = getUserDB();
@@ -742,14 +857,16 @@ app.get("/user/profile", firebaseAuth, async (req, res) => {
   }
 });
 
-// Update User Profile
 app.patch("/user/profile", firebaseAuth, async (req, res) => {
   try {
     const conn = getUserDB();
     const User = getUserModel(conn);
+    const updates = { ...req.body };
+    delete updates.userId;
+    delete updates.userID;
     const user = await User.findOneAndUpdate(
       { userId: req.userId },
-      { $set: req.body },
+      { $set: updates },
       { new: true, upsert: true }
     );
     res.json({ success: true, user });
@@ -758,12 +875,15 @@ app.patch("/user/profile", firebaseAuth, async (req, res) => {
   }
 });
 
-// Overall Rank
 app.get("/user/overall-rank", firebaseAuth, async (req, res) => {
   try {
     const conn = getUserDB();
     const AttemptHistory = getAttemptHistoryModel(conn);
-    const userAttempts = await AttemptHistory.find({ userId: req.userId }).lean();
+    const User = getUserModel(conn);
+    const [userAttempts, userProfile] = await Promise.all([
+      AttemptHistory.find({ userId: req.userId }).lean(),
+      User.findOne({ userId: req.userId }).lean(),
+    ]);
     if (userAttempts.length === 0) {
       return res.json({
         success: true,
@@ -795,6 +915,8 @@ app.get("/user/overall-rank", firebaseAuth, async (req, res) => {
     res.json({
       success: true,
       hasRank: true,
+      userID: userProfile?.userID || null,
+      name: userProfile?.name || null,
       rank,
       totalMarks: Math.round(totalMarks * 100) / 100,
       totalCorrect,
@@ -807,11 +929,11 @@ app.get("/user/overall-rank", firebaseAuth, async (req, res) => {
   }
 });
 
-// Global Leaderboard
 app.get("/leaderboard/global", async (req, res) => {
   try {
     const conn = getUserDB();
     const AttemptHistory = getAttemptHistoryModel(conn);
+    const User = getUserModel(conn);
     const limit = parseInt(req.query.limit) || 50;
     const leaderboard = await AttemptHistory.aggregate([
       {
@@ -826,45 +948,47 @@ app.get("/leaderboard/global", async (req, res) => {
       { $limit: limit },
       { $project: { userId: "$_id", totalMarks: 1, totalCorrect: 1, attempts: 1, rank: { $literal: 0 } } }
     ]);
-    leaderboard.forEach((entry, i) => entry.rank = i + 1);
+    const uids = leaderboard.map((entry) => entry.userId);
+    const profiles = await User.find({ userId: { $in: uids } }, { userId: 1, userID: 1, name: 1 }).lean();
+    const profileMap = new Map(profiles.map((p) => [p.userId, p]));
+    const publicLeaderboard = leaderboard.map((entry, i) => {
+      const profile = profileMap.get(entry.userId);
+      return {
+        rank: i + 1,
+        userID: profile?.userID || "anonymous",
+        name: profile?.name || null,
+        totalMarks: entry.totalMarks,
+        totalCorrect: entry.totalCorrect,
+        attempts: entry.attempts,
+      };
+    });
     res.json({
       success: true,
-      leaderboard,
+      leaderboard: publicLeaderboard,
       totalParticipants: await AttemptHistory.distinct("userId").then(ids => new Set(ids).size)
     });
   } catch (err) {
     res.status(500).json({ success: false, message: err.message });
   }
 });
-
-// 404 & Error Handlers
 app.use((req, res) => {
   res.status(404).json({ success: false, message: "Route not found" });
 });
-
 app.use((err, req, res, next) => {
-  console.error(err);
   res.status(500).json({ success: false, message: "Internal server error" });
 });
 
-// ====================== START SERVER ======================
 const PORT = process.env.PORT || 8080;
 
 async function startServer() {
   try {
     await connectAllDatabases();
-    app.listen(PORT, () => {
-      console.log(`🚀 Server running on port ${PORT}`);
-      console.log(`📍 Deployed URL: https://prepswipe-backend-fbe2athsg2hjh0e7.southeastasia-01.azurewebsites.net`);
-    });
+    app.listen(PORT, () => {});
   } catch (err) {
-    console.error("❌ Failed to start server:", err.message);
     process.exit(1);
   }
 }
-
 startServer();
-
 module.exports = {
   app,
   firebaseAuth,
