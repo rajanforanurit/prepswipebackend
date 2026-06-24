@@ -3,7 +3,6 @@ const express = require("express");
 const mongoose = require("mongoose");
 const admin = require("firebase-admin");
 const cors = require("cors");
-
 if (!admin.apps.length) {
   try {
     const serviceAccount = JSON.parse(process.env.FIREBASE_SERVICE_ACCOUNT);
@@ -39,6 +38,7 @@ const COMMON_OPTIONS = {
 
 let questionConn = null;
 let userConn = null;
+
 async function connectQuestionDB() {
   if (questionConn && questionConn.readyState === 1) return questionConn;
   const uri = process.env.QUESTION_DB_URI;
@@ -53,9 +53,9 @@ async function connectQuestionDB() {
   questionConn.on("disconnected", () => {});
 
   await questionConn.asPromise();
-
   return questionConn;
 }
+
 async function connectUserDB() {
   if (userConn && userConn.readyState === 1) return userConn;
   const uri = process.env.USER_DB_URI;
@@ -66,28 +66,33 @@ async function connectUserDB() {
     bufferCommands: true,
     bufferTimeoutMS: 30000,
   });
-
   userConn.on("error", () => {});
   userConn.on("disconnected", () => {});
 
   await userConn.asPromise();
   return userConn;
 }
+
 async function connectAllDatabases() {
   await Promise.all([connectQuestionDB(), connectUserDB()]);
 }
+
 function getQuestionDB() {
   if (!questionConn || questionConn.readyState !== 1) {
     throw new Error("Question DB not connected");
   }
   return questionConn;
 }
+
 function getUserDB() {
   if (!userConn || userConn.readyState !== 1) {
     throw new Error("User DB not connected");
   }
   return userConn;
 }
+
+// ─── Schemas ────────────────────────────────────────────────────────────────
+
 const QuestionSchema = new mongoose.Schema({
   _id: { type: Number },
   exam: { type: String, required: true },
@@ -178,6 +183,7 @@ function getUserModel(connection) {
   if (connection.models.User) return connection.models.User;
   return connection.model("User", UserSchema);
 }
+
 function generateUserIDSuggestions(base) {
   const clean = String(base).toLowerCase().replace(/[^a-z0-9_]/g, "").slice(0, 15) || "user";
   const suggestions = [];
@@ -187,12 +193,14 @@ function generateUserIDSuggestions(base) {
   }
   return suggestions;
 }
+
 async function isUserIDAvailable(User, userID, excludeFirebaseUID) {
   const query = { userID };
   if (excludeFirebaseUID) query.userId = { $ne: excludeFirebaseUID };
   const existing = await User.findOne(query).lean();
   return !existing;
 }
+
 const AccuracyBreakdownSchema = new mongoose.Schema({
   key: { type: String, required: true },
   attempted: { type: Number, default: 0 },
@@ -262,6 +270,7 @@ function getAnalyticsModel(connection) {
   if (connection.models.Analytics) return connection.models.Analytics;
   return connection.model("Analytics", AnalyticsSchema);
 }
+
 const AttemptHistorySchema = new mongoose.Schema({
   userId: {
     type: String,
@@ -286,11 +295,40 @@ const AttemptHistorySchema = new mongoose.Schema({
 }, { timestamps: false });
 
 AttemptHistorySchema.index({ userId: 1, questionId: 1 });
+
 function getAttemptHistoryModel(connection) {
   if (connection.models.AttemptHistory) return connection.models.AttemptHistory;
   return connection.model("AttemptHistory", AttemptHistorySchema);
 }
+const BookmarkSchema = new mongoose.Schema({
+  userId: {
+    type: String,
+    required: true,
+    index: true,
+  },
+  questionId: {
+    type: mongoose.Schema.Types.Mixed,
+    required: true,
+  },
+  collection: {
+    type: String,
+    required: true,
+    enum: ["pcsquestions", "bookquestions", "paragraphquestions"],
+    default: "pcsquestions",
+  },
+  bookmarkedAt: {
+    type: Date,
+    default: Date.now,
+  },
+}, { timestamps: false });
 
+// Prevent duplicate bookmarks for the same user + question + collection
+BookmarkSchema.index({ userId: 1, questionId: 1, collection: 1 }, { unique: true });
+
+function getBookmarkModel(connection) {
+  if (connection.models.Bookmark) return connection.models.Bookmark;
+  return connection.model("Bookmark", BookmarkSchema);
+}
 const firebaseAuth = async (req, res, next) => {
   try {
     const authHeader = req.headers.authorization;
@@ -299,16 +337,13 @@ const firebaseAuth = async (req, res, next) => {
     }
     const idToken = authHeader.split("Bearer ")[1];
     const decodedToken = await admin.auth().verifyIdToken(idToken);
-
     req.user = decodedToken;
     req.userId = decodedToken.uid;
-
     next();
   } catch (error) {
     return res.status(401).json({ success: false, message: "Invalid or expired token" });
   }
 };
-
 const IST_OFFSET_MS = 5.5 * 60 * 60 * 1000;
 
 function todayIST() {
@@ -368,6 +403,7 @@ function computeStrongWeak(subjectAccuracy) {
 
 function updateStreak(analytics, today, yesterday) {
   if (analytics.lastStudyDate === today) {
+    // already studied today, no change
   } else if (analytics.lastStudyDate === yesterday) {
     analytics.currentStreak = (analytics.currentStreak || 0) + 1;
   } else {
@@ -475,6 +511,24 @@ async function updateAnalyticsOnSubmit({
   await analytics.save();
   return analytics;
 }
+
+// ─── Helper: update bookmarkCount in analytics ───────────────────────────────
+
+async function updateBookmarkCount(userId, delta) {
+  try {
+    const conn = getUserDB();
+    const Analytics = getAnalyticsModel(conn);
+    await Analytics.findOneAndUpdate(
+      { userId },
+      { $inc: { bookmarkCount: delta } },
+      { upsert: true }
+    );
+  } catch (e) {
+    // Non-fatal; analytics update failure should not break bookmark operations
+  }
+}
+
+// ─── Routes ───────────────────────────────────────────────────────────────────
 
 app.get("/health", (req, res) => {
   res.json({ success: true, message: "Server is running" });
@@ -753,7 +807,9 @@ app.post("/test/finish", firebaseAuth, async (req, res) => {
     for (const a of attempts) {
       const isCorrect = !!a.isCorrect;
       const isSkipped = !!a.isSkipped;
-      const marksEarned = isCorrect ? (a.questionMeta?.marks || 2) : (isSkipped ? 0 : -(a.questionMeta?.negativeMarks || 0));
+      const marksEarned = isCorrect
+        ? (a.questionMeta?.marks || 2)
+        : (isSkipped ? 0 : -(a.questionMeta?.negativeMarks || 0));
 
       await updateAnalyticsOnSubmit({
         userId: req.userId,
@@ -829,6 +885,7 @@ app.post("/test/finish", firebaseAuth, async (req, res) => {
     res.status(500).json({ success: false, message: err.message });
   }
 });
+
 app.get("/user/profile", firebaseAuth, async (req, res) => {
   try {
     const conn = getUserDB();
@@ -971,13 +1028,165 @@ app.get("/leaderboard/global", async (req, res) => {
     res.status(500).json({ success: false, message: err.message });
   }
 });
+app.post("/bookmark", firebaseAuth, async (req, res) => {
+  try {
+    const { questionId, collection: col = "pcsquestions" } = req.body;
+
+    if (!questionId) {
+      return res.status(400).json({ success: false, message: "questionId is required" });
+    }
+
+    const validCollections = ["pcsquestions", "bookquestions", "paragraphquestions"];
+    if (!validCollections.includes(col)) {
+      return res.status(400).json({
+        success: false,
+        message: `collection must be one of: ${validCollections.join(", ")}`,
+      });
+    }
+
+    const conn = getUserDB();
+    const Bookmark = getBookmarkModel(conn);
+
+    // Check for existing bookmark (duplicate guard)
+    const existing = await Bookmark.findOne({
+      userId: req.userId,
+      questionId,
+      collection: col,
+    }).lean();
+
+    if (existing) {
+      return res.status(409).json({
+        success: false,
+        message: "Question is already bookmarked",
+        bookmark: existing,
+      });
+    }
+
+    const bookmark = await Bookmark.create({
+      userId: req.userId,
+      questionId,
+      collection: col,
+      bookmarkedAt: new Date(),
+    });
+
+    // Increment bookmarkCount in analytics (non-blocking)
+    await updateBookmarkCount(req.userId, 1);
+
+    res.status(201).json({ success: true, bookmark });
+  } catch (err) {
+    if (err?.code === 11000) {
+      return res.status(409).json({ success: false, message: "Question is already bookmarked" });
+    }
+    res.status(500).json({ success: false, message: err.message });
+  }
+});
+app.get("/bookmarks", firebaseAuth, async (req, res) => {
+  try {
+    const { collection: colFilter, limit = 50, skip = 0 } = req.query;
+
+    const conn = getUserDB();
+    const Bookmark = getBookmarkModel(conn);
+
+    const bookmarkQuery = { userId: req.userId };
+    if (colFilter) bookmarkQuery.collection = colFilter;
+
+    const bookmarks = await Bookmark.find(bookmarkQuery)
+      .sort({ bookmarkedAt: -1 })
+      .skip(Number(skip))
+      .limit(Number(limit))
+      .lean();
+
+    if (bookmarks.length === 0) {
+      return res.json({ success: true, count: 0, bookmarks: [] });
+    }
+
+    // Group bookmark IDs by their source collection for efficient batch lookup
+    const byCollection = {};
+    for (const bm of bookmarks) {
+      if (!byCollection[bm.collection]) byCollection[bm.collection] = [];
+      byCollection[bm.collection].push(bm.questionId);
+    }
+
+    // Fetch full question details from each relevant collection
+    const questionMap = new Map();
+    await Promise.all(
+      Object.entries(byCollection).map(async ([col, ids]) => {
+        try {
+          const model = getQuestionModel(col);
+          const questions = await model.find({ _id: { $in: ids } }).lean();
+          for (const q of questions) {
+            // Key by "collection::questionId" to avoid cross-collection ID collisions
+            questionMap.set(`${col}::${q._id}`, q);
+          }
+        } catch (e) {
+          // If a collection fails, continue with others
+        }
+      })
+    );
+
+    // Merge bookmark metadata with full question details
+    const enrichedBookmarks = bookmarks.map((bm) => ({
+      bookmarkId: bm._id,
+      bookmarkedAt: bm.bookmarkedAt,
+      collection: bm.collection,
+      question: questionMap.get(`${bm.collection}::${bm.questionId}`) || null,
+    }));
+
+    res.json({
+      success: true,
+      count: enrichedBookmarks.length,
+      bookmarks: enrichedBookmarks,
+    });
+  } catch (err) {
+    res.status(500).json({ success: false, message: err.message });
+  }
+});
+app.delete("/bookmark/:questionId", firebaseAuth, async (req, res) => {
+  try {
+    const { questionId } = req.params;
+    const col = req.query.collection || "pcsquestions";
+
+    const conn = getUserDB();
+    const Bookmark = getBookmarkModel(conn);
+
+    // questionId in the DB might be stored as a Number; try coercing if no match
+    let deleted = await Bookmark.findOneAndDelete({
+      userId: req.userId,
+      questionId,
+      collection: col,
+    });
+
+    // Retry with numeric ID in case questions use Number _id
+    if (!deleted) {
+      const numericId = Number(questionId);
+      if (!isNaN(numericId)) {
+        deleted = await Bookmark.findOneAndDelete({
+          userId: req.userId,
+          questionId: numericId,
+          collection: col,
+        });
+      }
+    }
+
+    if (!deleted) {
+      return res.status(404).json({ success: false, message: "Bookmark not found" });
+    }
+
+    // Decrement bookmarkCount in analytics (non-blocking, floor at 0)
+    await updateBookmarkCount(req.userId, -1);
+
+    res.json({ success: true, message: "Bookmark removed successfully" });
+  } catch (err) {
+    res.status(500).json({ success: false, message: err.message });
+  }
+});
 app.use((req, res) => {
   res.status(404).json({ success: false, message: "Route not found" });
 });
+
 app.use((err, req, res, next) => {
   res.status(500).json({ success: false, message: "Internal server error" });
 });
-
 const PORT = process.env.PORT || 8080;
 
 async function startServer() {
@@ -988,7 +1197,9 @@ async function startServer() {
     process.exit(1);
   }
 }
+
 startServer();
+
 module.exports = {
   app,
   firebaseAuth,
@@ -1000,4 +1211,5 @@ module.exports = {
   getUserModel,
   getAnalyticsModel,
   getAttemptHistoryModel,
+  getBookmarkModel,
 };
