@@ -111,6 +111,7 @@ const QuestionSchema = new mongoose.Schema({
   },
   marks: { type: Number, default: 2 },
   negativeMarks: { type: Number, default: 0.66 },
+  explanation: { type: String, trim: true, default: null },
   correct_answer: { type: Number, required: true },
   batchId: { type: String }
 }, { timestamps: true });
