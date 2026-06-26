@@ -11,9 +11,7 @@ if (!admin.apps.length) {
     });
   } catch (error) {}
 }
-
 const app = express();
-
 app.use(cors({
   origin: true,
   credentials: true,
@@ -23,7 +21,6 @@ app.use(cors({
 
 app.use(express.json({ limit: "10mb" }));
 app.use(express.urlencoded({ extended: true }));
-
 mongoose.set("bufferCommands", true);
 mongoose.set("bufferTimeoutMS", 30000);
 
@@ -38,12 +35,12 @@ const COMMON_OPTIONS = {
 
 let questionConn = null;
 let userConn = null;
-
+let caConn = null;
+let itConn = null;
 async function connectQuestionDB() {
   if (questionConn && questionConn.readyState === 1) return questionConn;
   const uri = process.env.QUESTION_DB_URI;
   if (!uri) throw new Error("QUESTION_DB_URI is not defined in environment variables");
-
   questionConn = mongoose.createConnection(uri, {
     ...COMMON_OPTIONS,
     bufferCommands: true,
@@ -51,7 +48,6 @@ async function connectQuestionDB() {
   });
   questionConn.on("error", () => {});
   questionConn.on("disconnected", () => {});
-
   await questionConn.asPromise();
   return questionConn;
 }
@@ -60,7 +56,6 @@ async function connectUserDB() {
   if (userConn && userConn.readyState === 1) return userConn;
   const uri = process.env.USER_DB_URI;
   if (!uri) throw new Error("USER_DB_URI is not defined in environment variables");
-
   userConn = mongoose.createConnection(uri, {
     ...COMMON_OPTIONS,
     bufferCommands: true,
@@ -68,30 +63,63 @@ async function connectUserDB() {
   });
   userConn.on("error", () => {});
   userConn.on("disconnected", () => {});
-
   await userConn.asPromise();
   return userConn;
 }
 
+async function connectCADB() {
+  if (caConn && caConn.readyState === 1) return caConn;
+  const uri = process.env.CAMONGODB_URI;
+  if (!uri) throw new Error("CAMONGODB_URI is not defined in environment variables");
+  caConn = mongoose.createConnection(uri, {
+    ...COMMON_OPTIONS,
+    bufferCommands: true,
+    bufferTimeoutMS: 30000,
+  });
+  caConn.on("error", () => {});
+  caConn.on("disconnected", () => {});
+  await caConn.asPromise();
+  return caConn;
+}
+
+async function connectITDB() {
+  if (itConn && itConn.readyState === 1) return itConn;
+  const uri = process.env.ITMONGODB_URI;
+  if (!uri) throw new Error("ITMONGODB_URI is not defined in environment variables");
+  itConn = mongoose.createConnection(uri, {
+    ...COMMON_OPTIONS,
+    bufferCommands: true,
+    bufferTimeoutMS: 30000,
+  });
+  itConn.on("error", () => {});
+  itConn.on("disconnected", () => {});
+  await itConn.asPromise();
+  return itConn;
+}
+
 async function connectAllDatabases() {
-  await Promise.all([connectQuestionDB(), connectUserDB()]);
+  await Promise.all([connectQuestionDB(), connectUserDB(), connectCADB(), connectITDB()]);
 }
 
 function getQuestionDB() {
-  if (!questionConn || questionConn.readyState !== 1) {
-    throw new Error("Question DB not connected");
-  }
+  if (!questionConn || questionConn.readyState !== 1) throw new Error("Question DB not connected");
   return questionConn;
 }
 
 function getUserDB() {
-  if (!userConn || userConn.readyState !== 1) {
-    throw new Error("User DB not connected");
-  }
+  if (!userConn || userConn.readyState !== 1) throw new Error("User DB not connected");
   return userConn;
 }
 
-// ─── Schemas ────────────────────────────────────────────────────────────────
+function getCADB() {
+  if (!caConn || caConn.readyState !== 1) throw new Error("Current Affairs DB not connected");
+  return caConn;
+}
+
+function getITDB() {
+  if (!itConn || itConn.readyState !== 1) throw new Error("Important Topics DB not connected");
+  return itConn;
+}
 
 const QuestionSchema = new mongoose.Schema({
   _id: { type: Number },
@@ -116,6 +144,21 @@ const QuestionSchema = new mongoose.Schema({
   batchId: { type: String }
 }, { timestamps: true });
 
+const CurrentAffairSchema = new mongoose.Schema({
+  title: { type: String, required: true, trim: true },
+  date: { type: String, required: true },
+  subject: { type: String, required: true, trim: true },
+  imgUrl: { type: String, trim: true, default: null },
+  overview: { type: String, required: true },
+  highlights: { type: [String], default: [] }
+}, { timestamps: true });
+
+const ImportantTopicSchema = new mongoose.Schema({
+  title: { type: String, required: true },
+  subject: { type: String, required: true },
+  points: [{ type: String, required: true }]
+}, { timestamps: true });
+
 function getQuestionModel(collectionName = "pcsquestions") {
   const conn = getQuestionDB();
   const map = {
@@ -126,6 +169,18 @@ function getQuestionModel(collectionName = "pcsquestions") {
   const modelName = map[collectionName] || "PcsQuestion";
   if (conn.models[modelName]) return conn.models[modelName];
   return conn.model(modelName, QuestionSchema, collectionName in map ? collectionName : "pcsquestions");
+}
+
+function getCAModel() {
+  const conn = getCADB();
+  if (conn.models.CurrentAffair) return conn.models.CurrentAffair;
+  return conn.model("CurrentAffair", CurrentAffairSchema, "ca_articles");
+}
+
+function getITModel() {
+  const conn = getITDB();
+  if (conn.models.ImportantTopic) return conn.models.ImportantTopic;
+  return conn.model("ImportantTopic", ImportantTopicSchema, "important_topics");
 }
 
 const collections = {
@@ -301,6 +356,7 @@ function getAttemptHistoryModel(connection) {
   if (connection.models.AttemptHistory) return connection.models.AttemptHistory;
   return connection.model("AttemptHistory", AttemptHistorySchema);
 }
+
 const BookmarkSchema = new mongoose.Schema({
   userId: {
     type: String,
@@ -323,13 +379,13 @@ const BookmarkSchema = new mongoose.Schema({
   },
 }, { timestamps: false });
 
-// Prevent duplicate bookmarks for the same user + question + collection
 BookmarkSchema.index({ userId: 1, questionId: 1, collection: 1 }, { unique: true });
 
 function getBookmarkModel(connection) {
   if (connection.models.Bookmark) return connection.models.Bookmark;
   return connection.model("Bookmark", BookmarkSchema);
 }
+
 const firebaseAuth = async (req, res, next) => {
   try {
     const authHeader = req.headers.authorization;
@@ -345,6 +401,7 @@ const firebaseAuth = async (req, res, next) => {
     return res.status(401).json({ success: false, message: "Invalid or expired token" });
   }
 };
+
 const IST_OFFSET_MS = 5.5 * 60 * 60 * 1000;
 
 function todayIST() {
@@ -404,7 +461,6 @@ function computeStrongWeak(subjectAccuracy) {
 
 function updateStreak(analytics, today, yesterday) {
   if (analytics.lastStudyDate === today) {
-    // already studied today, no change
   } else if (analytics.lastStudyDate === yesterday) {
     analytics.currentStreak = (analytics.currentStreak || 0) + 1;
   } else {
@@ -513,8 +569,6 @@ async function updateAnalyticsOnSubmit({
   return analytics;
 }
 
-// ─── Helper: update bookmarkCount in analytics ───────────────────────────────
-
 async function updateBookmarkCount(userId, delta) {
   try {
     const conn = getUserDB();
@@ -524,12 +578,8 @@ async function updateBookmarkCount(userId, delta) {
       { $inc: { bookmarkCount: delta } },
       { upsert: true }
     );
-  } catch (e) {
-    // Non-fatal; analytics update failure should not break bookmark operations
-  }
+  } catch (e) {}
 }
-
-// ─── Routes ───────────────────────────────────────────────────────────────────
 
 app.get("/health", (req, res) => {
   res.json({ success: true, message: "Server is running" });
@@ -1029,6 +1079,7 @@ app.get("/leaderboard/global", async (req, res) => {
     res.status(500).json({ success: false, message: err.message });
   }
 });
+
 app.post("/bookmark", firebaseAuth, async (req, res) => {
   try {
     const { questionId, collection: col = "pcsquestions" } = req.body;
@@ -1048,7 +1099,6 @@ app.post("/bookmark", firebaseAuth, async (req, res) => {
     const conn = getUserDB();
     const Bookmark = getBookmarkModel(conn);
 
-    // Check for existing bookmark (duplicate guard)
     const existing = await Bookmark.findOne({
       userId: req.userId,
       questionId,
@@ -1070,7 +1120,6 @@ app.post("/bookmark", firebaseAuth, async (req, res) => {
       bookmarkedAt: new Date(),
     });
 
-    // Increment bookmarkCount in analytics (non-blocking)
     await updateBookmarkCount(req.userId, 1);
 
     res.status(201).json({ success: true, bookmark });
@@ -1081,6 +1130,7 @@ app.post("/bookmark", firebaseAuth, async (req, res) => {
     res.status(500).json({ success: false, message: err.message });
   }
 });
+
 app.get("/bookmarks", firebaseAuth, async (req, res) => {
   try {
     const { collection: colFilter, limit = 50, skip = 0 } = req.query;
@@ -1101,14 +1151,12 @@ app.get("/bookmarks", firebaseAuth, async (req, res) => {
       return res.json({ success: true, count: 0, bookmarks: [] });
     }
 
-    // Group bookmark IDs by their source collection for efficient batch lookup
     const byCollection = {};
     for (const bm of bookmarks) {
       if (!byCollection[bm.collection]) byCollection[bm.collection] = [];
       byCollection[bm.collection].push(bm.questionId);
     }
 
-    // Fetch full question details from each relevant collection
     const questionMap = new Map();
     await Promise.all(
       Object.entries(byCollection).map(async ([col, ids]) => {
@@ -1116,16 +1164,12 @@ app.get("/bookmarks", firebaseAuth, async (req, res) => {
           const model = getQuestionModel(col);
           const questions = await model.find({ _id: { $in: ids } }).lean();
           for (const q of questions) {
-            // Key by "collection::questionId" to avoid cross-collection ID collisions
             questionMap.set(`${col}::${q._id}`, q);
           }
-        } catch (e) {
-          // If a collection fails, continue with others
-        }
+        } catch (e) {}
       })
     );
 
-    // Merge bookmark metadata with full question details
     const enrichedBookmarks = bookmarks.map((bm) => ({
       bookmarkId: bm._id,
       bookmarkedAt: bm.bookmarkedAt,
@@ -1142,6 +1186,7 @@ app.get("/bookmarks", firebaseAuth, async (req, res) => {
     res.status(500).json({ success: false, message: err.message });
   }
 });
+
 app.delete("/bookmark/:questionId", firebaseAuth, async (req, res) => {
   try {
     const { questionId } = req.params;
@@ -1150,14 +1195,12 @@ app.delete("/bookmark/:questionId", firebaseAuth, async (req, res) => {
     const conn = getUserDB();
     const Bookmark = getBookmarkModel(conn);
 
-    // questionId in the DB might be stored as a Number; try coercing if no match
     let deleted = await Bookmark.findOneAndDelete({
       userId: req.userId,
       questionId,
       collection: col,
     });
 
-    // Retry with numeric ID in case questions use Number _id
     if (!deleted) {
       const numericId = Number(questionId);
       if (!isNaN(numericId)) {
@@ -1173,7 +1216,6 @@ app.delete("/bookmark/:questionId", firebaseAuth, async (req, res) => {
       return res.status(404).json({ success: false, message: "Bookmark not found" });
     }
 
-    // Decrement bookmarkCount in analytics (non-blocking, floor at 0)
     await updateBookmarkCount(req.userId, -1);
 
     res.json({ success: true, message: "Bookmark removed successfully" });
@@ -1181,15 +1223,93 @@ app.delete("/bookmark/:questionId", firebaseAuth, async (req, res) => {
     res.status(500).json({ success: false, message: err.message });
   }
 });
+
+app.get("/current-affairs", firebaseAuth, async (req, res) => {
+  try {
+    const { limit = 20, skip = 0, subject, date, search } = req.query;
+
+    const CurrentAffair = getCAModel();
+    const filter = {};
+    if (subject) filter.subject = subject;
+    if (date) filter.date = date;
+    if (search) filter.title = { $regex: search, $options: "i" };
+
+    const [items, total] = await Promise.all([
+      CurrentAffair.find(filter).sort({ date: -1, createdAt: -1 }).skip(Number(skip)).limit(Number(limit)).lean(),
+      CurrentAffair.countDocuments(filter)
+    ]);
+
+    res.json({ success: true, total, count: items.length, data: items });
+  } catch (err) {
+    res.status(500).json({ success: false, message: err.message });
+  }
+});
+
+app.get("/current-affairs/subjects", firebaseAuth, async (req, res) => {
+  try {
+    const CurrentAffair = getCAModel();
+    const subjects = await CurrentAffair.distinct("subject");
+    res.json({ success: true, subjects: subjects.sort() });
+  } catch (err) {
+    res.status(500).json({ success: false, message: err.message });
+  }
+});
+
+app.get("/current-affairs/:id", firebaseAuth, async (req, res) => {
+  try {
+    const CurrentAffair = getCAModel();
+    const item = await CurrentAffair.findById(req.params.id).lean();
+    if (!item) return res.status(404).json({ success: false, message: "Current affair not found" });
+    res.json({ success: true, data: item });
+  } catch (err) {
+    res.status(500).json({ success: false, message: err.message });
+  }
+});
+app.get("/important-topics", firebaseAuth, async (req, res) => {
+  try {
+    const { limit = 20, skip = 0, subject, search } = req.query;
+
+    const ImportantTopic = getITModel();
+    const filter = {};
+    if (subject) filter.subject = subject;
+    if (search) filter.title = { $regex: search, $options: "i" };
+
+    const [items, total] = await Promise.all([
+      ImportantTopic.find(filter).sort({ createdAt: -1 }).skip(Number(skip)).limit(Number(limit)).lean(),
+      ImportantTopic.countDocuments(filter)
+    ]);
+
+    res.json({ success: true, total, count: items.length, data: items });
+  } catch (err) {
+    res.status(500).json({ success: false, message: err.message });
+  }
+});
+app.get("/important-topics/subjects", firebaseAuth, async (req, res) => {
+  try {
+    const ImportantTopic = getITModel();
+    const subjects = await ImportantTopic.distinct("subject");
+    res.json({ success: true, subjects: subjects.sort() });
+  } catch (err) {
+    res.status(500).json({ success: false, message: err.message });
+  }
+});
+app.get("/important-topics/:id", firebaseAuth, async (req, res) => {
+  try {
+    const ImportantTopic = getITModel();
+    const item = await ImportantTopic.findById(req.params.id).lean();
+    if (!item) return res.status(404).json({ success: false, message: "Important topic not found" });
+    res.json({ success: true, data: item });
+  } catch (err) {
+    res.status(500).json({ success: false, message: err.message });
+  }
+});
 app.use((req, res) => {
   res.status(404).json({ success: false, message: "Route not found" });
 });
-
 app.use((err, req, res, next) => {
   res.status(500).json({ success: false, message: "Internal server error" });
 });
 const PORT = process.env.PORT || 8080;
-
 async function startServer() {
   try {
     await connectAllDatabases();
@@ -1198,16 +1318,18 @@ async function startServer() {
     process.exit(1);
   }
 }
-
 startServer();
-
 module.exports = {
   app,
   firebaseAuth,
   connectAllDatabases,
   getQuestionDB,
   getUserDB,
+  getCADB,
+  getITDB,
   getQuestionModel,
+  getCAModel,
+  getITModel,
   collections,
   getUserModel,
   getAnalyticsModel,
