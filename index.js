@@ -38,6 +38,8 @@ let userConn = null;
 let caConn = null;
 let itConn = null;
 let dykConn = null;
+let tipConn = null;
+
 async function connectQuestionDB() {
   if (questionConn && questionConn.readyState === 1) return questionConn;
   const uri = process.env.QUESTION_DB_URI;
@@ -113,8 +115,30 @@ async function connectDYKDB() {
   return dykConn;
 }
 
+async function connectTIPDB() {
+  if (tipConn && tipConn.readyState === 1) return tipConn;
+  const uri = process.env.TIPMONGODB_URI;
+  if (!uri) throw new Error("TIPMONGODB_URI is not defined in environment variables");
+  tipConn = mongoose.createConnection(uri, {
+    ...COMMON_OPTIONS,
+    bufferCommands: true,
+    bufferTimeoutMS: 30000,
+  });
+  tipConn.on("error", () => {});
+  tipConn.on("disconnected", () => {});
+  await tipConn.asPromise();
+  return tipConn;
+}
+
 async function connectAllDatabases() {
-  await Promise.all([connectQuestionDB(), connectUserDB(), connectCADB(), connectITDB(), connectDYKDB()]);
+  await Promise.all([
+    connectQuestionDB(),
+    connectUserDB(),
+    connectCADB(),
+    connectITDB(),
+    connectDYKDB(),
+    connectTIPDB(),
+  ]);
 }
 
 function getQuestionDB() {
@@ -140,6 +164,11 @@ function getITDB() {
 function getDYKDB() {
   if (!dykConn || dykConn.readyState !== 1) throw new Error("Did You Know DB not connected");
   return dykConn;
+}
+
+function getTIPDB() {
+  if (!tipConn || tipConn.readyState !== 1) throw new Error("Today In Past DB not connected");
+  return tipConn;
 }
 
 const QuestionSchema = new mongoose.Schema({
@@ -187,6 +216,13 @@ const DidYouKnowSchema = new mongoose.Schema({
   subject: { type: String, required: true }
 }, { timestamps: true });
 
+const TodayInPastSchema = new mongoose.Schema({
+  date: { type: String, required: true },
+  year: { type: String, required: true },
+  event: { type: String, required: true, trim: true },
+  subject: { type: String, required: true, trim: true }
+}, { timestamps: true });
+
 function getQuestionModel(collectionName = "pcsquestions") {
   const conn = getQuestionDB();
   const map = {
@@ -215,6 +251,12 @@ function getDYKModel() {
   const conn = getDYKDB();
   if (conn.models.DidYouKnow) return conn.models.DidYouKnow;
   return conn.model("DidYouKnow", DidYouKnowSchema, "did_you_know");
+}
+
+function getTIPModel() {
+  const conn = getTIPDB();
+  if (conn.models.TodayInPast) return conn.models.TodayInPast;
+  return conn.model("TodayInPast", TodayInPastSchema, "today_in_past");
 }
 
 const collections = {
@@ -260,7 +302,7 @@ const UserSchema = new mongoose.Schema({
     type: String,
     enum: [
       "UPSC", "UPPCS", "BPSC", "MPPCS", "RAS", "UKPCS", "CGPCS", "JPSC",
-      "HPSC", "WBPCS", "OPSC", "KPSC", "TNPSC",
+      "HPSC", "WBPCS", "OPSC", "KPSC", "TNPCS",
       "SSC CGL", "SSC CHSL", "SSC MTS", "SSC CPO",
       "IBPS PO", "IBPS CLERK", "SBI PO", "SBI CLERK", "RBI GRADE B",
       "RRB NTPC", "RRB GROUP D"
@@ -451,6 +493,14 @@ function yesterdayIST() {
   const ist = new Date(Date.now() + IST_OFFSET_MS - 86400000);
   return [
     ist.getUTCFullYear(),
+    String(ist.getUTCMonth() + 1).padStart(2, "0"),
+    String(ist.getUTCDate()).padStart(2, "0")
+  ].join("-");
+}
+
+function todayMMDD() {
+  const ist = new Date(Date.now() + IST_OFFSET_MS);
+  return [
     String(ist.getUTCMonth() + 1).padStart(2, "0"),
     String(ist.getUTCDate()).padStart(2, "0")
   ].join("-");
@@ -1299,6 +1349,7 @@ app.get("/current-affairs/:id", firebaseAuth, async (req, res) => {
     res.status(500).json({ success: false, message: err.message });
   }
 });
+
 app.get("/important-topics", firebaseAuth, async (req, res) => {
   try {
     const { limit = 20, skip = 0, subject, search } = req.query;
@@ -1318,6 +1369,7 @@ app.get("/important-topics", firebaseAuth, async (req, res) => {
     res.status(500).json({ success: false, message: err.message });
   }
 });
+
 app.get("/important-topics/subjects", firebaseAuth, async (req, res) => {
   try {
     const ImportantTopic = getITModel();
@@ -1327,6 +1379,7 @@ app.get("/important-topics/subjects", firebaseAuth, async (req, res) => {
     res.status(500).json({ success: false, message: err.message });
   }
 });
+
 app.get("/important-topics/:id", firebaseAuth, async (req, res) => {
   try {
     const ImportantTopic = getITModel();
@@ -1337,6 +1390,7 @@ app.get("/important-topics/:id", firebaseAuth, async (req, res) => {
     res.status(500).json({ success: false, message: err.message });
   }
 });
+
 app.get("/did-you-know", firebaseAuth, async (req, res) => {
   try {
     const { limit = 20, skip = 0, subject, search } = req.query;
@@ -1356,6 +1410,7 @@ app.get("/did-you-know", firebaseAuth, async (req, res) => {
     res.status(500).json({ success: false, message: err.message });
   }
 });
+
 app.get("/did-you-know/random", firebaseAuth, async (req, res) => {
   try {
     const { subject, count = 1 } = req.query;
@@ -1375,6 +1430,7 @@ app.get("/did-you-know/random", firebaseAuth, async (req, res) => {
     res.status(500).json({ success: false, message: err.message });
   }
 });
+
 app.get("/did-you-know/subjects", firebaseAuth, async (req, res) => {
   try {
     const DidYouKnow = getDYKModel();
@@ -1384,6 +1440,7 @@ app.get("/did-you-know/subjects", firebaseAuth, async (req, res) => {
     res.status(500).json({ success: false, message: err.message });
   }
 });
+
 app.get("/did-you-know/:id", firebaseAuth, async (req, res) => {
   try {
     const DidYouKnow = getDYKModel();
@@ -1394,12 +1451,93 @@ app.get("/did-you-know/:id", firebaseAuth, async (req, res) => {
     res.status(500).json({ success: false, message: err.message });
   }
 });
+
+app.get("/today-in-past/today", firebaseAuth, async (req, res) => {
+  try {
+    const TodayInPast = getTIPModel();
+    const mmdd = todayMMDD();
+
+    const [items, total] = await Promise.all([
+      TodayInPast.find({ date: mmdd }).sort({ year: 1 }).lean(),
+      TodayInPast.countDocuments({ date: mmdd })
+    ]);
+
+    res.json({ success: true, date: mmdd, total, count: items.length, data: items });
+  } catch (err) {
+    res.status(500).json({ success: false, message: err.message });
+  }
+});
+
+app.get("/today-in-past/subjects", firebaseAuth, async (req, res) => {
+  try {
+    const TodayInPast = getTIPModel();
+    const subjects = await TodayInPast.distinct("subject");
+    res.json({ success: true, subjects: subjects.sort() });
+  } catch (err) {
+    res.status(500).json({ success: false, message: err.message });
+  }
+});
+
+app.get("/today-in-past/random", firebaseAuth, async (req, res) => {
+  try {
+    const { subject, count = 5 } = req.query;
+    const numCount = Math.max(1, Math.min(Number(count) || 5, 50));
+
+    const TodayInPast = getTIPModel();
+    const match = {};
+    if (subject) match.subject = subject;
+
+    const items = await TodayInPast.aggregate([
+      { $match: match },
+      { $sample: { size: numCount } },
+    ]);
+
+    res.json({ success: true, count: items.length, data: items });
+  } catch (err) {
+    res.status(500).json({ success: false, message: err.message });
+  }
+});
+
+app.get("/today-in-past", firebaseAuth, async (req, res) => {
+  try {
+    const { limit = 20, skip = 0, subject, date, search } = req.query;
+
+    const TodayInPast = getTIPModel();
+    const filter = {};
+    if (subject) filter.subject = subject;
+    if (date) filter.date = date;
+    if (search) filter.event = { $regex: search, $options: "i" };
+
+    const [items, total] = await Promise.all([
+      TodayInPast.find(filter).sort({ date: 1, year: 1 }).skip(Number(skip)).limit(Number(limit)).lean(),
+      TodayInPast.countDocuments(filter)
+    ]);
+
+    res.json({ success: true, total, count: items.length, data: items });
+  } catch (err) {
+    res.status(500).json({ success: false, message: err.message });
+  }
+});
+
+app.get("/today-in-past/:id", firebaseAuth, async (req, res) => {
+  try {
+    const TodayInPast = getTIPModel();
+    const item = await TodayInPast.findById(req.params.id).lean();
+    if (!item) return res.status(404).json({ success: false, message: "Today In Past item not found" });
+    res.json({ success: true, data: item });
+  } catch (err) {
+    res.status(500).json({ success: false, message: err.message });
+  }
+});
+
 app.use((req, res) => {
   res.status(404).json({ success: false, message: "Route not found" });
 });
+
 app.use((err, req, res, next) => {
   res.status(500).json({ success: false, message: "Internal server error" });
 });
+
 const PORT = process.env.PORT || 8080;
 async function startServer() {
   try {
@@ -1410,6 +1548,7 @@ async function startServer() {
   }
 }
 startServer();
+
 module.exports = {
   app,
   firebaseAuth,
@@ -1419,10 +1558,12 @@ module.exports = {
   getCADB,
   getITDB,
   getDYKDB,
+  getTIPDB,
   getQuestionModel,
   getCAModel,
   getITModel,
   getDYKModel,
+  getTIPModel,
   collections,
   getUserModel,
   getAnalyticsModel,
