@@ -37,6 +37,7 @@ let questionConn = null;
 let userConn = null;
 let caConn = null;
 let itConn = null;
+let dykConn = null;
 async function connectQuestionDB() {
   if (questionConn && questionConn.readyState === 1) return questionConn;
   const uri = process.env.QUESTION_DB_URI;
@@ -97,8 +98,23 @@ async function connectITDB() {
   return itConn;
 }
 
+async function connectDYKDB() {
+  if (dykConn && dykConn.readyState === 1) return dykConn;
+  const uri = process.env.DYKMONGODB_URI;
+  if (!uri) throw new Error("DYKMONGODB_URI is not defined in environment variables");
+  dykConn = mongoose.createConnection(uri, {
+    ...COMMON_OPTIONS,
+    bufferCommands: true,
+    bufferTimeoutMS: 30000,
+  });
+  dykConn.on("error", () => {});
+  dykConn.on("disconnected", () => {});
+  await dykConn.asPromise();
+  return dykConn;
+}
+
 async function connectAllDatabases() {
-  await Promise.all([connectQuestionDB(), connectUserDB(), connectCADB(), connectITDB()]);
+  await Promise.all([connectQuestionDB(), connectUserDB(), connectCADB(), connectITDB(), connectDYKDB()]);
 }
 
 function getQuestionDB() {
@@ -119,6 +135,11 @@ function getCADB() {
 function getITDB() {
   if (!itConn || itConn.readyState !== 1) throw new Error("Important Topics DB not connected");
   return itConn;
+}
+
+function getDYKDB() {
+  if (!dykConn || dykConn.readyState !== 1) throw new Error("Did You Know DB not connected");
+  return dykConn;
 }
 
 const QuestionSchema = new mongoose.Schema({
@@ -159,6 +180,13 @@ const ImportantTopicSchema = new mongoose.Schema({
   points: [{ type: String, required: true }]
 }, { timestamps: true });
 
+const DidYouKnowSchema = new mongoose.Schema({
+  question: { type: String, required: true },
+  answer: { type: String, required: true },
+  explanation: { type: String, required: true },
+  subject: { type: String, required: true }
+}, { timestamps: true });
+
 function getQuestionModel(collectionName = "pcsquestions") {
   const conn = getQuestionDB();
   const map = {
@@ -181,6 +209,12 @@ function getITModel() {
   const conn = getITDB();
   if (conn.models.ImportantTopic) return conn.models.ImportantTopic;
   return conn.model("ImportantTopic", ImportantTopicSchema, "important_topics");
+}
+
+function getDYKModel() {
+  const conn = getDYKDB();
+  if (conn.models.DidYouKnow) return conn.models.DidYouKnow;
+  return conn.model("DidYouKnow", DidYouKnowSchema, "did_you_know");
 }
 
 const collections = {
@@ -1303,6 +1337,63 @@ app.get("/important-topics/:id", firebaseAuth, async (req, res) => {
     res.status(500).json({ success: false, message: err.message });
   }
 });
+app.get("/did-you-know", firebaseAuth, async (req, res) => {
+  try {
+    const { limit = 20, skip = 0, subject, search } = req.query;
+
+    const DidYouKnow = getDYKModel();
+    const filter = {};
+    if (subject) filter.subject = subject;
+    if (search) filter.question = { $regex: search, $options: "i" };
+
+    const [items, total] = await Promise.all([
+      DidYouKnow.find(filter).sort({ createdAt: -1 }).skip(Number(skip)).limit(Number(limit)).lean(),
+      DidYouKnow.countDocuments(filter)
+    ]);
+
+    res.json({ success: true, total, count: items.length, data: items });
+  } catch (err) {
+    res.status(500).json({ success: false, message: err.message });
+  }
+});
+app.get("/did-you-know/random", firebaseAuth, async (req, res) => {
+  try {
+    const { subject, count = 1 } = req.query;
+    const numCount = Math.max(1, Math.min(Number(count) || 1, 50));
+
+    const DidYouKnow = getDYKModel();
+    const match = {};
+    if (subject) match.subject = subject;
+
+    const items = await DidYouKnow.aggregate([
+      { $match: match },
+      { $sample: { size: numCount } },
+    ]);
+
+    res.json({ success: true, count: items.length, data: items });
+  } catch (err) {
+    res.status(500).json({ success: false, message: err.message });
+  }
+});
+app.get("/did-you-know/subjects", firebaseAuth, async (req, res) => {
+  try {
+    const DidYouKnow = getDYKModel();
+    const subjects = await DidYouKnow.distinct("subject");
+    res.json({ success: true, subjects: subjects.sort() });
+  } catch (err) {
+    res.status(500).json({ success: false, message: err.message });
+  }
+});
+app.get("/did-you-know/:id", firebaseAuth, async (req, res) => {
+  try {
+    const DidYouKnow = getDYKModel();
+    const item = await DidYouKnow.findById(req.params.id).lean();
+    if (!item) return res.status(404).json({ success: false, message: "Did You Know item not found" });
+    res.json({ success: true, data: item });
+  } catch (err) {
+    res.status(500).json({ success: false, message: err.message });
+  }
+});
 app.use((req, res) => {
   res.status(404).json({ success: false, message: "Route not found" });
 });
@@ -1327,9 +1418,11 @@ module.exports = {
   getUserDB,
   getCADB,
   getITDB,
+  getDYKDB,
   getQuestionModel,
   getCAModel,
   getITModel,
+  getDYKModel,
   collections,
   getUserModel,
   getAnalyticsModel,
