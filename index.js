@@ -501,8 +501,8 @@ function yesterdayIST() {
 function todayMMDD() {
   const ist = new Date(Date.now() + IST_OFFSET_MS);
   return [
-    String(ist.getUTCMonth() + 1).padStart(2, "0"),
-    String(ist.getUTCDate()).padStart(2, "0")
+    String(ist.getUTCDate()).padStart(2, "0"),
+    String(ist.getUTCMonth() + 1).padStart(2, "0")
   ].join("-");
 }
 
