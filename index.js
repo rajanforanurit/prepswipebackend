@@ -818,11 +818,11 @@ app.patch("/user/userid", firebaseAuth, async (req, res) => {
 
 // ** Razorpay **
 
-app.post('/subscription/create', async (req, res) => {
+app.post('/subscription/create', firebaseAuth, async (req, res) => {
   try {
     console.log('Creating subscription for user:', req.userId);
     const options = {
-      plan_id: process.env.RAZORPAY_MONTHLY_PLAN_ID,
+      plan_id: "rzp_test_T7KlMba6nKjFRr",
       total_count: 12,
       quantity: 1,
       customer_notify: 1,
