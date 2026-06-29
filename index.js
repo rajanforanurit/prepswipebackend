@@ -818,7 +818,7 @@ app.patch("/user/userid", firebaseAuth, async (req, res) => {
 
 // ** Razorpay **
 
-app.post('/subscription/create', firebaseAuth, async (req, res) => {
+app.post('/subscription/create', async (req, res) => {
   try {
     console.log('Creating subscription for user:', req.userId);
     const options = {
@@ -836,7 +836,7 @@ app.post('/subscription/create', firebaseAuth, async (req, res) => {
     res.status(200).json({ success: true, subscription_id: subscription.id });
   } catch (error) {
     console.log('Error creating subscription:', error);
-    res.status(500).json({ success: false, error: error.message });
+    res.status(500).json({ success: false, error: error.message, details: error });
   }
 });
 
