@@ -766,6 +766,11 @@ async function updateBookmarkCount(userId, delta) {
   } catch (e) { }
 }
 
+
+app.get("/health", (req, res) => {
+  res.json({ success: true, message: "Server is running" });
+});
+
 // ** Subscription **
 
 const SubscriptionSchema = new mongoose.Schema(
@@ -1449,10 +1454,6 @@ app.post("/subscription/verify", firebaseAuth, async (req, res) => {
 
     }
 
-    // --------------------------------------------------
-    // Fetch Latest Subscription From Razorpay
-    // --------------------------------------------------
-
     const razorpaySubscription =
       await razorpay.subscriptions.fetch(
         razorpay_subscription_id
@@ -1474,10 +1475,6 @@ app.post("/subscription/verify", firebaseAuth, async (req, res) => {
 
     const Subscription =
       getSubscriptionModel(conn);
-
-    // --------------------------------------------------
-    // Upsert Subscription
-    // --------------------------------------------------
 
     const subscription =
       await Subscription.findOneAndUpdate(
@@ -1970,9 +1967,6 @@ async function requireQuestionAccess(
 
 // ** Subscription **
 
-app.get("/health", (req, res) => {
-  res.json({ success: true, message: "Server is running" });
-});
 
 app.get("/user/check-userid", firebaseAuth, async (req, res) => {
   try {
