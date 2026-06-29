@@ -35,6 +35,8 @@ const razorpay = new Razorpay({
 });
 // **Razorpay **
 
+console.log("Connecting to MongoDB databases...");
+
 const COMMON_OPTIONS = {
   serverSelectionTimeoutMS: 30000,
   connectTimeoutMS: 30000,
