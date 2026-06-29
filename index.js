@@ -403,11 +403,11 @@ const UserSchema = new mongoose.Schema({
     ],
     index: true,
   },
-  subscription: {
-    type: mongoose.Schema.Types.ObjectId,
-    ref: "Subscription",
-    default: null
-  },
+  // subscription: {
+  //   type: mongoose.Schema.Types.ObjectId,
+  //   ref: "Subscription",
+  //   default: null
+  // },
 }, { timestamps: true });
 
 
