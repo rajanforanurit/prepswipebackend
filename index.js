@@ -771,1201 +771,1201 @@ app.get("/health", (req, res) => {
   res.json({ success: true, message: "Server is running" });
 });
 
-// ** Subscription **
-
-const SubscriptionSchema = new mongoose.Schema(
-  {
-    userId: {
-      type: String,
-      required: true,
-      unique: true,
-      index: true,
-    },
-
-    provider: {
-      type: String,
-      default: SUBSCRIPTION_CONFIG.PROVIDER,
-    },
-
-    status: {
-      type: String,
-      default: SUBSCRIPTION_STATUS.CREATED,
-      enum: Object.values(SUBSCRIPTION_STATUS),
-      index: true,
-    },
-
-    razorpaySubscriptionId: {
-      type: String,
-      default: null,
-      index: true,
-    },
-
-    razorpayPaymentId: {
-      type: String,
-      default: null,
-    },
-
-    razorpayCustomerId: {
-      type: String,
-      default: null,
-    },
-
-    razorpayOrderId: {
-      type: String,
-      default: null,
-    },
+// // ** Subscription **
+
+// const SubscriptionSchema = new mongoose.Schema(
+//   {
+//     userId: {
+//       type: String,
+//       required: true,
+//       unique: true,
+//       index: true,
+//     },
+
+//     provider: {
+//       type: String,
+//       default: SUBSCRIPTION_CONFIG.PROVIDER,
+//     },
+
+//     status: {
+//       type: String,
+//       default: SUBSCRIPTION_STATUS.CREATED,
+//       enum: Object.values(SUBSCRIPTION_STATUS),
+//       index: true,
+//     },
+
+//     razorpaySubscriptionId: {
+//       type: String,
+//       default: null,
+//       index: true,
+//     },
+
+//     razorpayPaymentId: {
+//       type: String,
+//       default: null,
+//     },
+
+//     razorpayCustomerId: {
+//       type: String,
+//       default: null,
+//     },
+
+//     razorpayOrderId: {
+//       type: String,
+//       default: null,
+//     },
 
-    amount: {
-      type: Number,
-      default: SUBSCRIPTION_CONFIG.MONTHLY_PRICE,
-    },
+//     amount: {
+//       type: Number,
+//       default: SUBSCRIPTION_CONFIG.MONTHLY_PRICE,
+//     },
 
-    currency: {
-      type: String,
-      default: SUBSCRIPTION_CONFIG.CURRENCY,
-    },
+//     currency: {
+//       type: String,
+//       default: SUBSCRIPTION_CONFIG.CURRENCY,
+//     },
 
-    startedAt: {
-      type: Date,
-      default: null,
-    },
+//     startedAt: {
+//       type: Date,
+//       default: null,
+//     },
 
-    currentPeriodStart: {
-      type: Date,
-      default: null,
-    },
+//     currentPeriodStart: {
+//       type: Date,
+//       default: null,
+//     },
 
-    currentPeriodEnd: {
-      type: Date,
-      default: null,
-    },
+//     currentPeriodEnd: {
+//       type: Date,
+//       default: null,
+//     },
 
-    expiresAt: {
-      type: Date,
-      default: null,
-    },
+//     expiresAt: {
+//       type: Date,
+//       default: null,
+//     },
 
-    nextBillingAt: {
-      type: Date,
-      default: null,
-    },
+//     nextBillingAt: {
+//       type: Date,
+//       default: null,
+//     },
 
-    cancelledAt: {
-      type: Date,
-      default: null,
-    },
+//     cancelledAt: {
+//       type: Date,
+//       default: null,
+//     },
 
-    lastWebhookAt: {
-      type: Date,
-      default: null,
-    },
+//     lastWebhookAt: {
+//       type: Date,
+//       default: null,
+//     },
 
-    autoRenew: {
-      type: Boolean,
-      default: true,
-    },
-
-    notes: {
-      type: String,
-      default: "",
-    },
-
-    metadata: {
-      type: mongoose.Schema.Types.Mixed,
-      default: {},
-    }
+//     autoRenew: {
+//       type: Boolean,
+//       default: true,
+//     },
+
+//     notes: {
+//       type: String,
+//       default: "",
+//     },
+
+//     metadata: {
+//       type: mongoose.Schema.Types.Mixed,
+//       default: {},
+//     }
 
-  },
-  {
-    timestamps: true,
-  });
+//   },
+//   {
+//     timestamps: true,
+//   });
 
-SubscriptionSchema.methods.isActive = function () {
+// SubscriptionSchema.methods.isActive = function () {
 
-  return (
-    this.status === SUBSCRIPTION_STATUS.ACTIVE
-  );
+//   return (
+//     this.status === SUBSCRIPTION_STATUS.ACTIVE
+//   );
 
-};
+// };
 
-SubscriptionSchema.methods.isExpired = function () {
+// SubscriptionSchema.methods.isExpired = function () {
 
-  if (!this.expiresAt)
-    return false;
+//   if (!this.expiresAt)
+//     return false;
 
-  return new Date() > this.expiresAt;
+//   return new Date() > this.expiresAt;
 
-};
+// };
 
-SubscriptionSchema.methods.toClient = function () {
+// SubscriptionSchema.methods.toClient = function () {
 
-  return {
+//   return {
 
-    status: this.status,
+//     status: this.status,
 
-    amount: this.amount,
+//     amount: this.amount,
 
-    currency: this.currency,
+//     currency: this.currency,
 
-    startedAt: this.startedAt,
+//     startedAt: this.startedAt,
 
-    expiresAt: this.expiresAt,
+//     expiresAt: this.expiresAt,
 
-    nextBillingAt: this.nextBillingAt,
+//     nextBillingAt: this.nextBillingAt,
 
-    autoRenew: this.autoRenew,
+//     autoRenew: this.autoRenew,
 
-  };
+//   };
 
-};
+// };
 
-function getSubscriptionModel(connection) {
+// function getSubscriptionModel(connection) {
 
-  if (connection.models.Subscription)
-    return connection.models.Subscription;
+//   if (connection.models.Subscription)
+//     return connection.models.Subscription;
 
-  return connection.model(
-    "Subscription",
-    SubscriptionSchema,
-    "subscriptions"
-  );
+//   return connection.model(
+//     "Subscription",
+//     SubscriptionSchema,
+//     "subscriptions"
+//   );
 
-}
+// }
 
-//** Usage Schema
+// //** Usage Schema
 
-const UsageSchema = new mongoose.Schema(
-  {
-    userId: {
-      type: String,
-      required: true,
-      unique: true,
-      index: true,
-    },
+// const UsageSchema = new mongoose.Schema(
+//   {
+//     userId: {
+//       type: String,
+//       required: true,
+//       unique: true,
+//       index: true,
+//     },
 
-    freeQuestionsUsed: {
-      type: Number,
-      default: 0,
-      min: 0,
-    },
+//     freeQuestionsUsed: {
+//       type: Number,
+//       default: 0,
+//       min: 0,
+//     },
 
-    lastQuestionAt: {
-      type: Date,
-      default: null,
-    },
+//     lastQuestionAt: {
+//       type: Date,
+//       default: null,
+//     },
 
-    resetAt: {
-      type: Date,
-      default: () => new Date(Date.now() + (8 * 60 * 60 * 1000)),
-      index: true,
-    },
+//     resetAt: {
+//       type: Date,
+//       default: () => new Date(Date.now() + (8 * 60 * 60 * 1000)),
+//       index: true,
+//     },
 
-    metadata: {
-      type: mongoose.Schema.Types.Mixed,
-      default: {},
-    }
+//     metadata: {
+//       type: mongoose.Schema.Types.Mixed,
+//       default: {},
+//     }
 
-  },
-  {
-    timestamps: true,
-  });
+//   },
+//   {
+//     timestamps: true,
+//   });
 
-UsageSchema.index({
-  userId: 1,
-});
+// UsageSchema.index({
+//   userId: 1,
+// });
 
-UsageSchema.index({
-  resetAt: 1,
-});
+// UsageSchema.index({
+//   resetAt: 1,
+// });
 
-UsageSchema.methods.shouldReset = function () {
+// UsageSchema.methods.shouldReset = function () {
 
-  return new Date() >= this.resetAt;
+//   return new Date() >= this.resetAt;
 
-};
+// };
 
-UsageSchema.methods.resetUsage = function () {
+// UsageSchema.methods.resetUsage = function () {
 
-  this.freeQuestionsUsed = 0;
+//   this.freeQuestionsUsed = 0;
 
-  this.lastQuestionAt = null;
+//   this.lastQuestionAt = null;
 
-  this.resetAt = new Date(
-    Date.now() + (8 * 60 * 60 * 1000)
-  );
+//   this.resetAt = new Date(
+//     Date.now() + (8 * 60 * 60 * 1000)
+//   );
 
-};
+// };
 
-UsageSchema.methods.canUseQuestion = function () {
+// UsageSchema.methods.canUseQuestion = function () {
 
-  return (
-    this.freeQuestionsUsed <
-    SUBSCRIPTION_CONFIG.FEATURE_LIMITS.questions
-  );
+//   return (
+//     this.freeQuestionsUsed <
+//     SUBSCRIPTION_CONFIG.FEATURE_LIMITS.questions
+//   );
 
-};
+// };
 
 
-UsageSchema.methods.consumeQuestion = function () {
+// UsageSchema.methods.consumeQuestion = function () {
 
-  this.freeQuestionsUsed++;
+//   this.freeQuestionsUsed++;
 
-  this.lastQuestionAt = new Date();
+//   this.lastQuestionAt = new Date();
 
-};
+// };
 
 
-UsageSchema.methods.remainingQuestions = function () {
+// UsageSchema.methods.remainingQuestions = function () {
 
-  return Math.max(
-    SUBSCRIPTION_CONFIG.FEATURE_LIMITS.questions -
-    this.freeQuestionsUsed,
-    0
-  );
+//   return Math.max(
+//     SUBSCRIPTION_CONFIG.FEATURE_LIMITS.questions -
+//     this.freeQuestionsUsed,
+//     0
+//   );
 
-};
+// };
 
 
-UsageSchema.methods.toClient = function () {
+// UsageSchema.methods.toClient = function () {
 
-  return {
+//   return {
 
-    freeQuestionsUsed: this.freeQuestionsUsed,
+//     freeQuestionsUsed: this.freeQuestionsUsed,
 
-    remainingQuestions: this.remainingQuestions(),
+//     remainingQuestions: this.remainingQuestions(),
 
-    resetAt: this.resetAt,
+//     resetAt: this.resetAt,
 
-  };
+//   };
 
-};
+// };
 
-function getUsageModel(connection) {
+// function getUsageModel(connection) {
 
-  if (connection.models.Usage)
-    return connection.models.Usage;
+//   if (connection.models.Usage)
+//     return connection.models.Usage;
 
-  return connection.model(
-    "Usage",
-    UsageSchema,
-    "usage"
-  );
+//   return connection.model(
+//     "Usage",
+//     UsageSchema,
+//     "usage"
+//   );
 
-}
+// }
 
-async function getSubscription(userId) {
+// async function getSubscription(userId) {
 
-  const conn = getUserDB();
-  const Subscription = getSubscriptionModel(conn);
+//   const conn = getUserDB();
+//   const Subscription = getSubscriptionModel(conn);
 
-  return await Subscription.findOne({ userId });
+//   return await Subscription.findOne({ userId });
 
-}
+// }
 
-async function getOrCreateUsage(userId) {
+// async function getOrCreateUsage(userId) {
 
-  const conn = getUserDB();
-  const Usage = getUsageModel(conn);
+//   const conn = getUserDB();
+//   const Usage = getUsageModel(conn);
 
-  let usage = await Usage.findOne({ userId });
+//   let usage = await Usage.findOne({ userId });
 
-  if (!usage) {
+//   if (!usage) {
 
-    usage = await Usage.create({
-      userId,
-    });
+//     usage = await Usage.create({
+//       userId,
+//     });
 
-  }
+//   }
 
-  return usage;
+//   return usage;
 
-}
+// }
 
-async function resetUsageIfNeeded(userId) {
+// async function resetUsageIfNeeded(userId) {
 
-  const usage = await getOrCreateUsage(userId);
+//   const usage = await getOrCreateUsage(userId);
 
-  if (usage.shouldReset()) {
+//   if (usage.shouldReset()) {
 
-    usage.resetUsage();
+//     usage.resetUsage();
 
-    await usage.save();
+//     await usage.save();
 
-  }
+//   }
 
-  return usage;
+//   return usage;
 
-}
+// }
 
-async function hasPremiumAccess(userId) {
+// async function hasPremiumAccess(userId) {
 
-  const subscription = await getSubscription(userId);
+//   const subscription = await getSubscription(userId);
 
-  if (!subscription)
-    return false;
+//   if (!subscription)
+//     return false;
 
-  if (subscription.isExpired())
-    return false;
+//   if (subscription.isExpired())
+//     return false;
 
-  return subscription.isActive();
+//   return subscription.isActive();
 
-}
+// }
 
-function getFeatureLimit(feature) {
+// function getFeatureLimit(feature) {
 
-  switch (feature) {
+//   switch (feature) {
 
-    case "questions":
-      return SUBSCRIPTION_CONFIG.FEATURE_LIMITS.questions;
+//     case "questions":
+//       return SUBSCRIPTION_CONFIG.FEATURE_LIMITS.questions;
 
-    default:
-      return 0;
+//     default:
+//       return 0;
 
-  }
+//   }
 
-}
+// }
 
-function getFeatureUsage(usage, feature) {
+// function getFeatureUsage(usage, feature) {
 
-  switch (feature) {
+//   switch (feature) {
 
-    case "questions":
-      return usage.freeQuestionsUsed;
+//     case "questions":
+//       return usage.freeQuestionsUsed;
 
-    default:
-      return 0;
+//     default:
+//       return 0;
 
-  }
+//   }
 
-}
+// }
 
-async function canUseFeature(userId, feature) {
+// async function canUseFeature(userId, feature) {
 
-  if (await hasPremiumAccess(userId)) {
+//   if (await hasPremiumAccess(userId)) {
 
-    return {
-      allowed: true,
-      premium: true,
-      remaining: -1,
-    };
+//     return {
+//       allowed: true,
+//       premium: true,
+//       remaining: -1,
+//     };
 
-  }
+//   }
 
-  const usage = await resetUsageIfNeeded(userId);
+//   const usage = await resetUsageIfNeeded(userId);
 
-  const limit = getFeatureLimit(feature);
+//   const limit = getFeatureLimit(feature);
 
-  const used = getFeatureUsage(usage, feature);
+//   const used = getFeatureUsage(usage, feature);
 
-  return {
+//   return {
 
-    premium: false,
+//     premium: false,
 
-    allowed: used < limit,
+//     allowed: used < limit,
 
-    used,
+//     used,
 
-    remaining: Math.max(limit - used, 0),
+//     remaining: Math.max(limit - used, 0),
 
-    resetAt: usage.resetAt,
+//     resetAt: usage.resetAt,
 
-  };
+//   };
 
-}
+// }
 
-async function consumeFeature(userId, feature) {
+// async function consumeFeature(userId, feature) {
 
-  if (await hasPremiumAccess(userId)) {
+//   if (await hasPremiumAccess(userId)) {
 
-    return {
+//     return {
 
-      success: true,
+//       success: true,
 
-      premium: true,
+//       premium: true,
 
-      unlimited: true,
+//       unlimited: true,
 
-      remaining: -1,
+//       remaining: -1,
 
-    };
+//     };
 
-  }
+//   }
 
-  const usage = await resetUsageIfNeeded(userId);
+//   const usage = await resetUsageIfNeeded(userId);
 
-  switch (feature) {
+//   switch (feature) {
 
-    case "questions":
+//     case "questions":
 
-      if (!usage.canUseQuestion()) {
+//       if (!usage.canUseQuestion()) {
 
-        return {
+//         return {
 
-          success: false,
+//           success: false,
 
-          premium: false,
+//           premium: false,
 
-          message: "Free question limit reached.",
+//           message: "Free question limit reached.",
 
-          remaining: 0,
+//           remaining: 0,
 
-          resetAt: usage.resetAt,
+//           resetAt: usage.resetAt,
 
-        };
+//         };
 
-      }
+//       }
 
-      usage.consumeQuestion();
+//       usage.consumeQuestion();
 
-      break;
+//       break;
 
-    default:
+//     default:
 
-      return {
+//       return {
 
-        success: false,
+//         success: false,
 
-        message: "Unknown feature.",
+//         message: "Unknown feature.",
 
-      };
+//       };
 
-  }
+//   }
 
-  await usage.save();
+//   await usage.save();
 
-  return {
+//   return {
 
-    success: true,
+//     success: true,
 
-    premium: false,
+//     premium: false,
 
-    remaining: usage.remainingQuestions(),
+//     remaining: usage.remainingQuestions(),
 
-    resetAt: usage.resetAt,
+//     resetAt: usage.resetAt,
 
-  };
+//   };
 
-}
+// }
 
-async function createRazorpaySubscription() {
+// async function createRazorpaySubscription() {
 
-  return await razorpay.subscriptions.create({
+//   return await razorpay.subscriptions.create({
 
-    plan_id: SUBSCRIPTION_CONFIG.PLAN_ID,
+//     plan_id: SUBSCRIPTION_CONFIG.PLAN_ID,
 
-    total_count: 120,
+//     total_count: 120,
 
-    quantity: 1,
+//     quantity: 1,
 
-    customer_notify: 1,
+//     customer_notify: 1,
 
-  });
+//   });
 
-}
+// }
 
-app.get("/subscription/status", firebaseAuth, async (req, res) => {
+// app.get("/subscription/status", firebaseAuth, async (req, res) => {
 
-  try {
+//   try {
 
-    const premium = await hasPremiumAccess(req.userId);
+//     const premium = await hasPremiumAccess(req.userId);
 
-    if (premium) {
+//     if (premium) {
 
-      const subscription = await getSubscription(req.userId);
+//       const subscription = await getSubscription(req.userId);
 
-      return res.json({
+//       return res.json({
 
-        success: true,
+//         success: true,
 
-        premium: true,
+//         premium: true,
 
-        status: subscription.status,
+//         status: subscription.status,
 
-        subscription: subscription.toClient(),
+//         subscription: subscription.toClient(),
 
-        usage: {
+//         usage: {
 
-          unlimited: true,
+//           unlimited: true,
 
-          questionsRemaining: -1,
+//           questionsRemaining: -1,
 
-          resetAt: null,
+//           resetAt: null,
 
-        }
+//         }
 
-      });
+//       });
 
-    }
+//     }
 
-    const usage = await resetUsageIfNeeded(req.userId);
+//     const usage = await resetUsageIfNeeded(req.userId);
 
-    return res.json({
+//     return res.json({
 
-      success: true,
+//       success: true,
 
-      premium: false,
+//       premium: false,
 
-      status: "free",
+//       status: "free",
 
-      subscription: null,
+//       subscription: null,
 
-      usage: {
+//       usage: {
 
-        unlimited: false,
+//         unlimited: false,
 
-        questionsRemaining: usage.remainingQuestions(),
+//         questionsRemaining: usage.remainingQuestions(),
 
-        questionsUsed: usage.freeQuestionsUsed,
+//         questionsUsed: usage.freeQuestionsUsed,
 
-        resetAt: usage.resetAt,
+//         resetAt: usage.resetAt,
 
-      }
+//       }
 
-    });
+//     });
 
-  }
+//   }
 
-  catch (err) {
+//   catch (err) {
 
-    return res.status(500).json({
+//     return res.status(500).json({
 
-      success: false,
+//       success: false,
 
-      message: err.message,
+//       message: err.message,
 
-    });
+//     });
 
-  }
+//   }
 
-});
+// });
 
-app.post("/subscription/create", firebaseAuth, async (req, res) => {
+// app.post("/subscription/create", firebaseAuth, async (req, res) => {
 
-  try {
-    const existingSubscription = await getSubscription(req.userId);
+//   try {
+//     const existingSubscription = await getSubscription(req.userId);
 
-    if (
-      existingSubscription &&
-      existingSubscription.isActive()
-    ) {
+//     if (
+//       existingSubscription &&
+//       existingSubscription.isActive()
+//     ) {
 
-      return res.json({
+//       return res.json({
 
-        success: true,
+//         success: true,
 
-        alreadySubscribed: true,
+//         alreadySubscribed: true,
 
-        message: "User already has an active subscription.",
+//         message: "User already has an active subscription.",
 
-        subscription: existingSubscription.toClient(),
+//         subscription: existingSubscription.toClient(),
 
-      });
+//       });
 
-    }
+//     }
 
-    const razorpaySubscription =
-      await createRazorpaySubscription();
+//     const razorpaySubscription =
+//       await createRazorpaySubscription();
 
-    return res.json({
+//     return res.json({
 
-      success: true,
+//       success: true,
 
-      alreadySubscribed: false,
+//       alreadySubscribed: false,
 
-      checkout: {
+//       checkout: {
 
-        key: process.env.RAZORPAY_KEY_ID,
+//         key: process.env.RAZORPAY_KEY_ID,
 
-        subscriptionId: razorpaySubscription.id,
+//         subscriptionId: razorpaySubscription.id,
 
-        status: razorpaySubscription.status,
+//         status: razorpaySubscription.status,
 
-      }
+//       }
 
-    });
+//     });
 
-  }
+//   }
 
-  catch (err) {
+//   catch (err) {
 
-    console.error(err);
+//     console.error(err);
 
-    return res.status(500).json({
+//     return res.status(500).json({
 
-      success: false,
+//       success: false,
 
-      message: err.message,
+//       message: err.message,
 
-    });
+//     });
 
-  }
+//   }
 
-});
+// });
 
-app.post("/subscription/verify", firebaseAuth, async (req, res) => {
+// app.post("/subscription/verify", firebaseAuth, async (req, res) => {
 
-  try {
+//   try {
 
-    const {
+//     const {
 
-      razorpay_payment_id,
-      razorpay_subscription_id,
-      razorpay_signature,
-      razorpay_response = {}
+//       razorpay_payment_id,
+//       razorpay_subscription_id,
+//       razorpay_signature,
+//       razorpay_response = {}
 
-    } = req.body;
+//     } = req.body;
 
-    if (
-      !razorpay_payment_id ||
-      !razorpay_subscription_id ||
-      !razorpay_signature
-    ) {
+//     if (
+//       !razorpay_payment_id ||
+//       !razorpay_subscription_id ||
+//       !razorpay_signature
+//     ) {
 
-      return res.status(400).json({
-        success: false,
-        message: "Missing payment information."
-      });
+//       return res.status(400).json({
+//         success: false,
+//         message: "Missing payment information."
+//       });
 
-    }
+//     }
 
-    // --------------------------------------------------
-    // Verify Checkout Signature
-    // --------------------------------------------------
+//     // --------------------------------------------------
+//     // Verify Checkout Signature
+//     // --------------------------------------------------
 
-    const verified = verifyCheckoutSignature({
+//     const verified = verifyCheckoutSignature({
 
-      paymentId: razorpay_payment_id,
+//       paymentId: razorpay_payment_id,
 
-      subscriptionId: razorpay_subscription_id,
+//       subscriptionId: razorpay_subscription_id,
 
-      signature: razorpay_signature,
+//       signature: razorpay_signature,
 
-    });
+//     });
 
-    if (!verified) {
+//     if (!verified) {
 
-      return res.status(400).json({
+//       return res.status(400).json({
 
-        success: false,
+//         success: false,
 
-        message: "Invalid payment signature."
+//         message: "Invalid payment signature."
 
-      });
+//       });
 
-    }
+//     }
 
-    const razorpaySubscription =
-      await razorpay.subscriptions.fetch(
-        razorpay_subscription_id
-      );
+//     const razorpaySubscription =
+//       await razorpay.subscriptions.fetch(
+//         razorpay_subscription_id
+//       );
 
-    if (!razorpaySubscription) {
+//     if (!razorpaySubscription) {
 
-      return res.status(404).json({
+//       return res.status(404).json({
 
-        success: false,
+//         success: false,
 
-        message: "Subscription not found."
+//         message: "Subscription not found."
 
-      });
+//       });
 
-    }
+//     }
 
-    const conn = getUserDB();
+//     const conn = getUserDB();
 
-    const Subscription =
-      getSubscriptionModel(conn);
+//     const Subscription =
+//       getSubscriptionModel(conn);
 
-    const subscription =
-      await Subscription.findOneAndUpdate(
+//     const subscription =
+//       await Subscription.findOneAndUpdate(
 
-        {
+//         {
 
-          userId: req.userId,
+//           userId: req.userId,
 
-        },
+//         },
 
-        {
+//         {
 
-          $set: {
+//           $set: {
 
-            provider: SUBSCRIPTION_CONFIG.PROVIDER,
+//             provider: SUBSCRIPTION_CONFIG.PROVIDER,
 
-            status: razorpaySubscription.status,
+//             status: razorpaySubscription.status,
 
-            razorpaySubscriptionId:
-              razorpaySubscription.id,
+//             razorpaySubscriptionId:
+//               razorpaySubscription.id,
 
-            razorpayPaymentId:
-              razorpay_payment_id,
+//             razorpayPaymentId:
+//               razorpay_payment_id,
 
-            razorpayCustomerId:
-              razorpaySubscription.customer_id || null,
+//             razorpayCustomerId:
+//               razorpaySubscription.customer_id || null,
 
-            amount:
-              SUBSCRIPTION_CONFIG.MONTHLY_PRICE,
+//             amount:
+//               SUBSCRIPTION_CONFIG.MONTHLY_PRICE,
 
-            currency:
-              SUBSCRIPTION_CONFIG.CURRENCY,
+//             currency:
+//               SUBSCRIPTION_CONFIG.CURRENCY,
 
-            startedAt:
-              razorpaySubscription.start_at
-                ? new Date(
-                  razorpaySubscription.start_at * 1000
-                )
-                : new Date(),
+//             startedAt:
+//               razorpaySubscription.start_at
+//                 ? new Date(
+//                   razorpaySubscription.start_at * 1000
+//                 )
+//                 : new Date(),
 
-            currentPeriodStart:
-              razorpaySubscription.current_start
-                ? new Date(
-                  razorpaySubscription.current_start * 1000
-                )
-                : null,
+//             currentPeriodStart:
+//               razorpaySubscription.current_start
+//                 ? new Date(
+//                   razorpaySubscription.current_start * 1000
+//                 )
+//                 : null,
 
-            currentPeriodEnd:
-              razorpaySubscription.current_end
-                ? new Date(
-                  razorpaySubscription.current_end * 1000
-                )
-                : null,
+//             currentPeriodEnd:
+//               razorpaySubscription.current_end
+//                 ? new Date(
+//                   razorpaySubscription.current_end * 1000
+//                 )
+//                 : null,
 
-            expiresAt:
-              razorpaySubscription.current_end
-                ? new Date(
-                  razorpaySubscription.current_end * 1000
-                )
-                : null,
+//             expiresAt:
+//               razorpaySubscription.current_end
+//                 ? new Date(
+//                   razorpaySubscription.current_end * 1000
+//                 )
+//                 : null,
 
-            nextBillingAt:
-              razorpaySubscription.charge_at
-                ? new Date(
-                  razorpaySubscription.charge_at * 1000
-                )
-                : null,
+//             nextBillingAt:
+//               razorpaySubscription.charge_at
+//                 ? new Date(
+//                   razorpaySubscription.charge_at * 1000
+//                 )
+//                 : null,
 
-            autoRenew:
-              !razorpaySubscription.cancel_at_cycle_end,
+//             autoRenew:
+//               !razorpaySubscription.cancel_at_cycle_end,
 
-            metadata: {
+//             metadata: {
 
-              checkout: razorpay_response,
+//               checkout: razorpay_response,
 
-              verifiedAt: new Date()
+//               verifiedAt: new Date()
 
-            }
+//             }
 
-          }
+//           }
 
-        },
+//         },
 
-        {
+//         {
 
-          upsert: true,
+//           upsert: true,
 
-          new: true,
+//           new: true,
 
-        }
+//         }
 
-      );
+//       );
 
-    const Usage =
-      getUsageModel(conn);
+//     const Usage =
+//       getUsageModel(conn);
 
-    await Usage.findOneAndUpdate(
+//     await Usage.findOneAndUpdate(
 
-      {
+//       {
 
-        userId: req.userId,
+//         userId: req.userId,
 
-      },
+//       },
 
-      {
+//       {
 
-        $setOnInsert: {
+//         $setOnInsert: {
 
-          userId: req.userId,
+//           userId: req.userId,
 
-        }
+//         }
 
-      },
+//       },
 
-      {
+//       {
 
-        upsert: true,
+//         upsert: true,
 
-      }
+//       }
 
-    );
+//     );
 
-    return res.json({
+//     return res.json({
 
-      success: true,
+//       success: true,
 
-      premium: subscription.isActive(),
+//       premium: subscription.isActive(),
 
-      subscription: subscription.toClient()
+//       subscription: subscription.toClient()
 
-    });
+//     });
 
-  }
+//   }
 
-  catch (err) {
+//   catch (err) {
 
-    console.error(err);
+//     console.error(err);
 
-    return res.status(500).json({
+//     return res.status(500).json({
 
-      success: false,
+//       success: false,
 
-      message: err.message,
+//       message: err.message,
 
-    });
+//     });
 
-  }
+//   }
 
-});
+// });
 
-app.post(
-  "/razorpay/webhook",
-  express.raw({ type: "application/json" }),
-  async (req, res) => {
+// app.post(
+//   "/razorpay/webhook",
+//   express.raw({ type: "application/json" }),
+//   async (req, res) => {
 
-    try {
+//     try {
 
-      const signature = req.headers["x-razorpay-signature"];
+//       const signature = req.headers["x-razorpay-signature"];
 
-      const body = req.body.toString();
+//       const body = req.body.toString();
 
-      const valid = verifyWebhookSignature(
-        body,
-        signature
-      );
+//       const valid = verifyWebhookSignature(
+//         body,
+//         signature
+//       );
 
-      if (!valid) {
+//       if (!valid) {
 
-        return res.status(400).json({
-          success: false,
-          message: "Invalid webhook signature."
-        });
+//         return res.status(400).json({
+//           success: false,
+//           message: "Invalid webhook signature."
+//         });
 
-      }
+//       }
 
-      const event = JSON.parse(body);
+//       const event = JSON.parse(body);
 
-      const eventType = event.event;
+//       const eventType = event.event;
 
-      const payload = event.payload || {};
+//       const payload = event.payload || {};
 
-      const subscriptionEntity =
-        payload.subscription?.entity;
+//       const subscriptionEntity =
+//         payload.subscription?.entity;
 
-      if (!subscriptionEntity) {
+//       if (!subscriptionEntity) {
 
-        return res.status(200).json({
-          success: true
-        });
+//         return res.status(200).json({
+//           success: true
+//         });
 
-      }
+//       }
 
-      const conn = getUserDB();
+//       const conn = getUserDB();
 
-      const Subscription =
-        getSubscriptionModel(conn);
+//       const Subscription =
+//         getSubscriptionModel(conn);
 
-      const subscription =
-        await Subscription.findOne({
+//       const subscription =
+//         await Subscription.findOne({
 
-          razorpaySubscriptionId:
-            subscriptionEntity.id
+//           razorpaySubscriptionId:
+//             subscriptionEntity.id
 
-        });
+//         });
 
-      if (!subscription) {
+//       if (!subscription) {
 
-        return res.status(200).json({
-          success: true
-        });
+//         return res.status(200).json({
+//           success: true
+//         });
 
-      }
+//       }
 
-      if (
-        subscription.lastWebhookEventId ===
-        event.id
-      ) {
+//       if (
+//         subscription.lastWebhookEventId ===
+//         event.id
+//       ) {
 
-        return res.status(200).json({
-          success: true
-        });
+//         return res.status(200).json({
+//           success: true
+//         });
 
-      }
+//       }
 
-      subscription.status =
-        subscriptionEntity.status;
+//       subscription.status =
+//         subscriptionEntity.status;
 
-      subscription.currentPeriodStart =
-        subscriptionEntity.current_start
-          ? new Date(
-            subscriptionEntity.current_start * 1000
-          )
-          : null;
+//       subscription.currentPeriodStart =
+//         subscriptionEntity.current_start
+//           ? new Date(
+//             subscriptionEntity.current_start * 1000
+//           )
+//           : null;
 
-      subscription.currentPeriodEnd =
-        subscriptionEntity.current_end
-          ? new Date(
-            subscriptionEntity.current_end * 1000
-          )
-          : null;
+//       subscription.currentPeriodEnd =
+//         subscriptionEntity.current_end
+//           ? new Date(
+//             subscriptionEntity.current_end * 1000
+//           )
+//           : null;
 
-      subscription.expiresAt =
-        subscription.currentPeriodEnd;
+//       subscription.expiresAt =
+//         subscription.currentPeriodEnd;
 
-      subscription.nextBillingAt =
-        subscriptionEntity.charge_at
-          ? new Date(
-            subscriptionEntity.charge_at * 1000
-          )
-          : null;
+//       subscription.nextBillingAt =
+//         subscriptionEntity.charge_at
+//           ? new Date(
+//             subscriptionEntity.charge_at * 1000
+//           )
+//           : null;
 
-      subscription.autoRenew =
-        !subscriptionEntity.cancel_at_cycle_end;
+//       subscription.autoRenew =
+//         !subscriptionEntity.cancel_at_cycle_end;
 
-      if (
-        subscriptionEntity.status ===
-        SUBSCRIPTION_STATUS.CANCELLED
-      ) {
+//       if (
+//         subscriptionEntity.status ===
+//         SUBSCRIPTION_STATUS.CANCELLED
+//       ) {
 
-        subscription.cancelledAt =
-          new Date();
+//         subscription.cancelledAt =
+//           new Date();
 
-      }
+//       }
 
-      subscription.lastWebhookAt =
-        new Date();
+//       subscription.lastWebhookAt =
+//         new Date();
 
-      subscription.lastWebhookEventId =
-        event.id;
+//       subscription.lastWebhookEventId =
+//         event.id;
 
-      subscription.lastWebhookEventType =
-        eventType;
+//       subscription.lastWebhookEventType =
+//         eventType;
 
-      subscription.metadata = {
+//       subscription.metadata = {
 
-        ...subscription.metadata,
+//         ...subscription.metadata,
 
-        latestWebhook: event
+//         latestWebhook: event
 
-      };
+//       };
 
-      await subscription.save();
+//       await subscription.save();
 
-      return res.status(200).json({
-        success: true
-      });
+//       return res.status(200).json({
+//         success: true
+//       });
 
-    }
+//     }
 
-    catch (err) {
+//     catch (err) {
 
-      console.error(err);
+//       console.error(err);
 
-      return res.status(500).json({
+//       return res.status(500).json({
 
-        success: false,
+//         success: false,
 
-        message: err.message
+//         message: err.message
 
-      });
+//       });
 
-    }
+//     }
 
-  }
-);
+//   }
+// );
 
-async function consumeUsage(userId, type) {
+// async function consumeUsage(userId, type) {
 
-  if (await hasPremiumAccess(userId)) {
+//   if (await hasPremiumAccess(userId)) {
 
-    return {
-      success: true,
-      premium: true,
-      unlimited: true,
-      remaining: -1,
-      resetAt: null,
-    };
+//     return {
+//       success: true,
+//       premium: true,
+//       unlimited: true,
+//       remaining: -1,
+//       resetAt: null,
+//     };
 
-  }
+//   }
 
-  await resetUsageIfNeeded(userId);
+//   await resetUsageIfNeeded(userId);
 
-  const conn = getUserDB();
-  const Usage = getUsageModel(conn);
+//   const conn = getUserDB();
+//   const Usage = getUsageModel(conn);
 
-  let field;
-  let limit;
+//   let field;
+//   let limit;
 
-  switch (type) {
+//   switch (type) {
 
-    case "question":
-      field = "freeQuestionsUsed";
-      limit = SUBSCRIPTION_CONFIG.FEATURE_LIMITS.questions;
-      break;
+//     case "question":
+//       field = "freeQuestionsUsed";
+//       limit = SUBSCRIPTION_CONFIG.FEATURE_LIMITS.questions;
+//       break;
 
-    default:
+//     default:
 
-      return {
-        success: false,
-        message: "Unknown usage type."
-      };
+//       return {
+//         success: false,
+//         message: "Unknown usage type."
+//       };
 
-  }
+//   }
 
-  const usage = await Usage.findOneAndUpdate(
+//   const usage = await Usage.findOneAndUpdate(
 
-    {
-      userId,
+//     {
+//       userId,
 
-      [field]: {
-        $lt: limit
-      }
+//       [field]: {
+//         $lt: limit
+//       }
 
-    },
+//     },
 
-    {
-      $inc: {
-        [field]: 1
-      },
+//     {
+//       $inc: {
+//         [field]: 1
+//       },
 
-      $set: {
+//       $set: {
 
-        ["lastQuestionAt"]: new Date()
+//         ["lastQuestionAt"]: new Date()
 
-      }
+//       }
 
-    },
+//     },
 
-    {
-      new: true
-    }
+//     {
+//       new: true
+//     }
 
-  );
+//   );
 
-  if (!usage) {
+//   if (!usage) {
 
-    const latest = await getOrCreateUsage(userId);
+//     const latest = await getOrCreateUsage(userId);
 
-    return {
+//     return {
 
-      success: false,
+//       success: false,
 
-      premium: false,
+//       premium: false,
 
-      subscriptionRequired: true,
+//       subscriptionRequired: true,
 
-      message: "Free question limit reached.",
+//       message: "Free question limit reached.",
 
-      remaining: 0,
+//       remaining: 0,
 
-      resetAt: latest.resetAt,
+//       resetAt: latest.resetAt,
 
-    };
+//     };
 
-  }
+//   }
 
-  const used = usage.freeQuestionsUsed;
+//   const used = usage.freeQuestionsUsed;
 
-  return {
+//   return {
 
-    success: true,
+//     success: true,
 
-    premium: false,
+//     premium: false,
 
-    unlimited: false,
+//     unlimited: false,
 
-    remaining: Math.max(
-      limit - used,
-      0
-    ),
+//     remaining: Math.max(
+//       limit - used,
+//       0
+//     ),
 
-    resetAt: usage.resetAt,
+//     resetAt: usage.resetAt,
 
-    used
+//     used
 
-  };
+//   };
 
-}
+// }
 
-async function requireUsage(type, req, res, next) {
+// async function requireUsage(type, req, res, next) {
 
-  try {
+//   try {
 
-    const access = await consumeUsage(
-      req.userId,
-      type
-    );
+//     const access = await consumeUsage(
+//       req.userId,
+//       type
+//     );
 
-    if (!access.success) {
+//     if (!access.success) {
 
-      return res.status(403).json({
+//       return res.status(403).json({
 
-        success: false,
+//         success: false,
 
-        subscriptionRequired: true,
+//         subscriptionRequired: true,
 
-        message: access.message,
+//         message: access.message,
 
-        usage: {
+//         usage: {
 
-          premium: false,
+//           premium: false,
 
-          remaining: access.remaining,
+//           remaining: access.remaining,
 
-          resetAt: access.resetAt,
+//           resetAt: access.resetAt,
 
-        }
+//         }
 
-      });
+//       });
 
-    }
+//     }
 
-    req.usage = access;
+//     req.usage = access;
 
-    next();
+//     next();
 
-  }
+//   }
 
-  catch (err) {
+//   catch (err) {
 
-    console.error(err);
+//     console.error(err);
 
-    return res.status(500).json({
+//     return res.status(500).json({
 
-      success: false,
+//       success: false,
 
-      message: err.message,
+//       message: err.message,
 
-    });
+//     });
 
-  }
+//   }
 
-}
+// }
 
-async function requireQuestionAccess(
-  req,
-  res,
-  next
-) {
+// async function requireQuestionAccess(
+//   req,
+//   res,
+//   next
+// ) {
 
-  return requireUsage(
-    USAGE_TYPES.QUESTION,
-    req,
-    res,
-    next
-  );
+//   return requireUsage(
+//     USAGE_TYPES.QUESTION,
+//     req,
+//     res,
+//     next
+//   );
 
-}
+// }
 
 
-// ** Subscription **
+// // ** Subscription **
 
 
 app.get("/user/check-userid", firebaseAuth, async (req, res) => {
