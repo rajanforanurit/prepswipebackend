@@ -388,7 +388,7 @@ async function fetchSubscription(subscriptionId) {
   return await razorpay.subscriptions.fetch(subscriptionId);
 }
 
-function verifyWebhookSignature(body, signature) {
+async function verifyWebhookSignature(body, signature) {
 
   return await razorpay.verifyWebhookSignature(body, signature, RAZORPAY_WEBHOOK_SECRET);
   // const expected = crypto
@@ -1115,8 +1115,8 @@ app.post(
         )
         .update(
           razorpay_payment_id +
-            "|" +
-            razorpay_subscription_id
+          "|" +
+          razorpay_subscription_id
         )
         .digest("hex");
 
