@@ -813,25 +813,24 @@ app.patch("/user/userid", firebaseAuth, async (req, res) => {
 
 // ** Razorpay **
 
-app.post('/subscription/create', async (req, res) => {
+app.post('/subscription/create', firebaseAuth, async (req, res) => {
   try {
     const options = {
-      plan_id: process.env.RAZORPAY_MONTHLY_PLAN_ID, // E.g., "plan_Njk4Nzg5" from dashboard
-      total_count: 12,                      // Charge the customer 12 times (e.g., monthly for a year)
+      plan_id: process.env.RAZORPAY_MONTHLY_PLAN_ID,
+      total_count: 12,
       quantity: 1,
-      customer_notify: 1,                   // 1 = Razorpay handles SMS/Email notifications
+      customer_notify: 1,
     };
 
     const subscription = await razorpay.subscriptions.create(options);
 
-    // TODO: Save subscription.id to your database with a "PENDING" status
     res.status(200).json({ success: true, subscription_id: subscription.id });
   } catch (error) {
     res.status(500).json({ success: false, error: error.message });
   }
 });
 
-app.post('/subscription/verify', async (req, res) => {
+app.post('/subscription/verify', firebaseAuth, async (req, res) => {
   try {
     const { razorpay_payment_id, razorpay_subscription_id, razorpay_signature } = req.body;
 
