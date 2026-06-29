@@ -1,6 +1,6 @@
 require("dotenv").config();
 const express = require("express");
-//const Razorpay = require("razorpay");
+const Razorpay = require("razorpay");
 const mongoose = require("mongoose");
 const admin = require("firebase-admin");
 const crypto = require("crypto");
@@ -27,6 +27,13 @@ app.use(express.json({ limit: "10mb" }));
 app.use(express.urlencoded({ extended: true }));
 mongoose.set("bufferCommands", true);
 mongoose.set("bufferTimeoutMS", 30000);
+
+// ** Razorpay **
+const razorpay = new Razorpay({
+  key_id: process.env.RAZORPAY_KEY_ID,
+  key_secret: process.env.RAZORPAY_KEY_SECRET,
+});
+// **Razorpay **
 
 const COMMON_OPTIONS = {
   serverSelectionTimeoutMS: 30000,
@@ -803,6 +810,50 @@ app.patch("/user/userid", firebaseAuth, async (req, res) => {
     res.status(500).json({ success: false, message: err.message });
   }
 });
+
+// ** Razorpay **
+
+app.post('/subscription/create', async (req, res) => {
+  try {
+    const options = {
+      plan_id: process.env.RAZORPAY_MONTHLY_PLAN_ID, // E.g., "plan_Njk4Nzg5" from dashboard
+      total_count: 12,                      // Charge the customer 12 times (e.g., monthly for a year)
+      quantity: 1,
+      customer_notify: 1,                   // 1 = Razorpay handles SMS/Email notifications
+    };
+
+    const subscription = await razorpay.subscriptions.create(options);
+
+    // TODO: Save subscription.id to your database with a "PENDING" status
+    res.status(200).json({ success: true, subscription_id: subscription.id });
+  } catch (error) {
+    res.status(500).json({ success: false, error: error.message });
+  }
+});
+
+app.post('/subscription/verify', async (req, res) => {
+  try {
+    const { razorpay_payment_id, razorpay_subscription_id, razorpay_signature } = req.body;
+
+    // Generate expected signature
+    const secret = process.env.RAZORPAY_KEY_SECRET;
+    const generatedSignature = crypto
+      .createHmac('sha256', secret)
+      .update(`${razorpay_payment_id}|${razorpay_subscription_id}`)
+      .digest('hex');
+
+    if (generatedSignature === razorpay_signature) {
+      // TODO: Update subscription status to "ACTIVE" in your database
+      res.status(200).json({ success: true, message: "Subscription verified successfully" });
+    } else {
+      res.status(400).json({ success: false, message: "Invalid signature verification failed" });
+    }
+  } catch (error) {
+    res.status(500).json({ success: false, error: error.message });
+  }
+});
+
+// ** Razorpay **
 
 app.get("/questions", firebaseAuth, async (req, res) => {
   try {
