@@ -752,11 +752,11 @@ app.post("/profile", firebaseAuth, async (req, res) => {
       { new: true, upsert: true }
     );
 
-    await Usage.findOneAndUpdate(
-      { userId: req.userId },
-      { $setOnInsert: { userId: req.userId } },
-      { upsert: true }
-    );
+    // await Usage.findOneAndUpdate(
+    //   { userId: req.userId },
+    //   { $setOnInsert: { userId: req.userId } },
+    //   { upsert: true }
+    // );
 
     res.json({ success: true, user });
   } catch (err) {
