@@ -5,6 +5,7 @@ const mongoose = require("mongoose");
 const admin = require("firebase-admin");
 const crypto = require("crypto");
 const cors = require("cors");
+const { log } = require("console");
 
 if (!admin.apps.length) {
   try {
@@ -36,6 +37,8 @@ const razorpay = new Razorpay({
 // **Razorpay **
 
 console.log("Connecting to MongoDB databases...");
+
+log("Connecting to MongoDB databases... log");
 
 const COMMON_OPTIONS = {
   serverSelectionTimeoutMS: 30000,
