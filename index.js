@@ -1,17 +1,26 @@
 require("dotenv").config();
 const express = require("express");
+const Razorpay = require("razorpay");
 const mongoose = require("mongoose");
 const admin = require("firebase-admin");
+const crypto = require("crypto");
 const cors = require("cors");
+
 if (!admin.apps.length) {
   try {
     const serviceAccount = JSON.parse(process.env.FIREBASE_SERVICE_ACCOUNT);
     admin.initializeApp({
       credential: admin.credential.cert(serviceAccount),
     });
-  } catch (error) {}
+  } catch (error) { }
 }
 const app = express();
+
+const razorpay = new Razorpay({
+  key_id: process.env.RAZORPAY_KEY_ID,
+  key_secret: process.env.RAZORPAY_KEY_SECRET,
+});
+
 app.use(cors({
   origin: true,
   credentials: true,
@@ -49,8 +58,8 @@ async function connectQuestionDB() {
     bufferCommands: true,
     bufferTimeoutMS: 30000,
   });
-  questionConn.on("error", () => {});
-  questionConn.on("disconnected", () => {});
+  questionConn.on("error", () => { });
+  questionConn.on("disconnected", () => { });
   await questionConn.asPromise();
   return questionConn;
 }
@@ -64,8 +73,8 @@ async function connectUserDB() {
     bufferCommands: true,
     bufferTimeoutMS: 30000,
   });
-  userConn.on("error", () => {});
-  userConn.on("disconnected", () => {});
+  userConn.on("error", () => { });
+  userConn.on("disconnected", () => { });
   await userConn.asPromise();
   return userConn;
 }
@@ -79,8 +88,8 @@ async function connectCADB() {
     bufferCommands: true,
     bufferTimeoutMS: 30000,
   });
-  caConn.on("error", () => {});
-  caConn.on("disconnected", () => {});
+  caConn.on("error", () => { });
+  caConn.on("disconnected", () => { });
   await caConn.asPromise();
   return caConn;
 }
@@ -94,8 +103,8 @@ async function connectITDB() {
     bufferCommands: true,
     bufferTimeoutMS: 30000,
   });
-  itConn.on("error", () => {});
-  itConn.on("disconnected", () => {});
+  itConn.on("error", () => { });
+  itConn.on("disconnected", () => { });
   await itConn.asPromise();
   return itConn;
 }
@@ -109,8 +118,8 @@ async function connectDYKDB() {
     bufferCommands: true,
     bufferTimeoutMS: 30000,
   });
-  dykConn.on("error", () => {});
-  dykConn.on("disconnected", () => {});
+  dykConn.on("error", () => { });
+  dykConn.on("disconnected", () => { });
   await dykConn.asPromise();
   return dykConn;
 }
@@ -124,8 +133,8 @@ async function connectTIPDB() {
     bufferCommands: true,
     bufferTimeoutMS: 30000,
   });
-  tipConn.on("error", () => {});
-  tipConn.on("disconnected", () => {});
+  tipConn.on("error", () => { });
+  tipConn.on("disconnected", () => { });
   await tipConn.asPromise();
   return tipConn;
 }
@@ -170,6 +179,91 @@ function getTIPDB() {
   if (!tipConn || tipConn.readyState !== 1) throw new Error("Today In Past DB not connected");
   return tipConn;
 }
+
+// ** Razorpay
+
+const SUBSCRIPTION_CONFIG = {
+
+  MONTHLY_PRICE: 39,
+  CURRENCY: "INR",
+  PLAN_ID: process.env.RAZORPAY_MONTHLY_PLAN_ID,
+  FEATURE_LIMITS: {
+    questions: 15,
+  },
+  PROVIDER: "razorpay",
+  ACTIVE_STATUS: "active",
+};
+
+const SUBSCRIPTION_STATUS = {
+
+  CREATED: "created",
+
+  AUTHENTICATED: "authenticated",
+
+  ACTIVE: "active",
+
+  PENDING: "pending",
+
+  HALTED: "halted",
+
+  CANCELLED: "cancelled",
+
+  EXPIRED: "expired",
+
+};
+
+function isSubscriptionActive(subscription) {
+
+  if (!subscription)
+    return false;
+
+  return subscription.status === SUBSCRIPTION_STATUS.ACTIVE;
+
+}
+
+function verifyCheckoutSignature({
+
+  paymentId,
+
+  subscriptionId,
+
+  signature,
+
+}) {
+
+  const generated = crypto
+    .createHmac(
+      "sha256",
+      process.env.RAZORPAY_KEY_SECRET
+    )
+    .update(`${paymentId}|${subscriptionId}`)
+    .digest("hex");
+
+  return generated === signature;
+
+}
+
+function verifyWebhookSignature(
+
+  rawBody,
+
+  signature
+
+) {
+
+  const generated = crypto
+    .createHmac(
+      "sha256",
+      process.env.RAZORPAY_WEBHOOK_SECRET
+    )
+    .update(rawBody)
+    .digest("hex");
+
+  return generated === signature;
+
+}
+
+// ** Razorpay **
 
 const QuestionSchema = new mongoose.Schema({
   _id: { type: Number },
@@ -309,7 +403,13 @@ const UserSchema = new mongoose.Schema({
     ],
     index: true,
   },
+  subscription: {
+    type: mongoose.Schema.Types.ObjectId,
+    ref: "Subscription",
+    default: null
+  },
 }, { timestamps: true });
+
 
 function getUserModel(connection) {
   if (connection.models.User) return connection.models.User;
@@ -461,6 +561,1210 @@ function getBookmarkModel(connection) {
   if (connection.models.Bookmark) return connection.models.Bookmark;
   return connection.model("Bookmark", BookmarkSchema);
 }
+
+// ** Subscription **
+
+const SubscriptionSchema = new mongoose.Schema(
+  {
+    userId: {
+      type: String,
+      required: true,
+      unique: true,
+      index: true,
+    },
+
+    provider: {
+      type: String,
+      default: SUBSCRIPTION_CONFIG.PROVIDER,
+    },
+
+    status: {
+      type: String,
+      default: SUBSCRIPTION_STATUS.CREATED,
+      enum: Object.values(SUBSCRIPTION_STATUS),
+      index: true,
+    },
+
+    razorpaySubscriptionId: {
+      type: String,
+      default: null,
+      index: true,
+    },
+
+    razorpayPaymentId: {
+      type: String,
+      default: null,
+    },
+
+    razorpayCustomerId: {
+      type: String,
+      default: null,
+    },
+
+    razorpayOrderId: {
+      type: String,
+      default: null,
+    },
+
+    amount: {
+      type: Number,
+      default: SUBSCRIPTION_CONFIG.MONTHLY_PRICE,
+    },
+
+    currency: {
+      type: String,
+      default: SUBSCRIPTION_CONFIG.CURRENCY,
+    },
+
+    startedAt: {
+      type: Date,
+      default: null,
+    },
+
+    currentPeriodStart: {
+      type: Date,
+      default: null,
+    },
+
+    currentPeriodEnd: {
+      type: Date,
+      default: null,
+    },
+
+    expiresAt: {
+      type: Date,
+      default: null,
+    },
+
+    nextBillingAt: {
+      type: Date,
+      default: null,
+    },
+
+    cancelledAt: {
+      type: Date,
+      default: null,
+    },
+
+    lastWebhookAt: {
+      type: Date,
+      default: null,
+    },
+
+    autoRenew: {
+      type: Boolean,
+      default: true,
+    },
+
+    notes: {
+      type: String,
+      default: "",
+    },
+
+    metadata: {
+      type: mongoose.Schema.Types.Mixed,
+      default: {},
+    }
+
+  },
+  {
+    timestamps: true,
+  });
+
+SubscriptionSchema.methods.isActive = function () {
+
+  return (
+    this.status === SUBSCRIPTION_STATUS.ACTIVE
+  );
+
+};
+
+SubscriptionSchema.methods.isExpired = function () {
+
+  if (!this.expiresAt)
+    return false;
+
+  return new Date() > this.expiresAt;
+
+};
+
+SubscriptionSchema.methods.toClient = function () {
+
+  return {
+
+    status: this.status,
+
+    amount: this.amount,
+
+    currency: this.currency,
+
+    startedAt: this.startedAt,
+
+    expiresAt: this.expiresAt,
+
+    nextBillingAt: this.nextBillingAt,
+
+    autoRenew: this.autoRenew,
+
+  };
+
+};
+
+function getSubscriptionModel(connection) {
+
+  if (connection.models.Subscription)
+    return connection.models.Subscription;
+
+  return connection.model(
+    "Subscription",
+    SubscriptionSchema,
+    "subscriptions"
+  );
+
+}
+
+//** Usage Schema
+
+const UsageSchema = new mongoose.Schema(
+  {
+    userId: {
+      type: String,
+      required: true,
+      unique: true,
+      index: true,
+    },
+
+    freeQuestionsUsed: {
+      type: Number,
+      default: 0,
+      min: 0,
+    },
+
+    lastQuestionAt: {
+      type: Date,
+      default: null,
+    },
+
+    resetAt: {
+      type: Date,
+      default: () => new Date(Date.now() + (8 * 60 * 60 * 1000)),
+      index: true,
+    },
+
+    metadata: {
+      type: mongoose.Schema.Types.Mixed,
+      default: {},
+    }
+
+  },
+  {
+    timestamps: true,
+  });
+
+UsageSchema.index({
+  userId: 1,
+});
+
+UsageSchema.index({
+  resetAt: 1,
+});
+
+UsageSchema.methods.shouldReset = function () {
+
+  return new Date() >= this.resetAt;
+
+};
+
+UsageSchema.methods.resetUsage = function () {
+
+  this.freeQuestionsUsed = 0;
+
+  this.lastQuestionAt = null;
+
+  this.resetAt = new Date(
+    Date.now() + (8 * 60 * 60 * 1000)
+  );
+
+};
+
+UsageSchema.methods.canUseQuestion = function () {
+
+  return (
+    this.freeQuestionsUsed <
+    SUBSCRIPTION_CONFIG.FEATURE_LIMITS.questions
+  );
+
+};
+
+
+UsageSchema.methods.consumeQuestion = function () {
+
+  this.freeQuestionsUsed++;
+
+  this.lastQuestionAt = new Date();
+
+};
+
+
+UsageSchema.methods.remainingQuestions = function () {
+
+  return Math.max(
+    SUBSCRIPTION_CONFIG.FEATURE_LIMITS.questions -
+    this.freeQuestionsUsed,
+    0
+  );
+
+};
+
+
+UsageSchema.methods.toClient = function () {
+
+  return {
+
+    freeQuestionsUsed: this.freeQuestionsUsed,
+
+    remainingQuestions: this.remainingQuestions(),
+
+    resetAt: this.resetAt,
+
+  };
+
+};
+
+function getUsageModel(connection) {
+
+  if (connection.models.Usage)
+    return connection.models.Usage;
+
+  return connection.model(
+    "Usage",
+    UsageSchema,
+    "usage"
+  );
+
+}
+
+async function getSubscription(userId) {
+
+  const conn = getUserDB();
+  const Subscription = getSubscriptionModel(conn);
+
+  return await Subscription.findOne({ userId });
+
+}
+
+async function getOrCreateUsage(userId) {
+
+  const conn = getUserDB();
+  const Usage = getUsageModel(conn);
+
+  let usage = await Usage.findOne({ userId });
+
+  if (!usage) {
+
+    usage = await Usage.create({
+      userId,
+    });
+
+  }
+
+  return usage;
+
+}
+
+async function resetUsageIfNeeded(userId) {
+
+  const usage = await getOrCreateUsage(userId);
+
+  if (usage.shouldReset()) {
+
+    usage.resetUsage();
+
+    await usage.save();
+
+  }
+
+  return usage;
+
+}
+
+async function hasPremiumAccess(userId) {
+
+  const subscription = await getSubscription(userId);
+
+  if (!subscription)
+    return false;
+
+  if (subscription.isExpired())
+    return false;
+
+  return subscription.isActive();
+
+}
+
+function getFeatureLimit(feature) {
+
+  switch (feature) {
+
+    case "questions":
+      return SUBSCRIPTION_CONFIG.FEATURE_LIMITS.questions;
+
+    default:
+      return 0;
+
+  }
+
+}
+
+function getFeatureUsage(usage, feature) {
+
+  switch (feature) {
+
+    case "questions":
+      return usage.freeQuestionsUsed;
+
+    default:
+      return 0;
+
+  }
+
+}
+
+async function canUseFeature(userId, feature) {
+
+  if (await hasPremiumAccess(userId)) {
+
+    return {
+      allowed: true,
+      premium: true,
+      remaining: -1,
+    };
+
+  }
+
+  const usage = await resetUsageIfNeeded(userId);
+
+  const limit = getFeatureLimit(feature);
+
+  const used = getFeatureUsage(usage, feature);
+
+  return {
+
+    premium: false,
+
+    allowed: used < limit,
+
+    used,
+
+    remaining: Math.max(limit - used, 0),
+
+    resetAt: usage.resetAt,
+
+  };
+
+}
+
+async function consumeFeature(userId, feature) {
+
+  if (await hasPremiumAccess(userId)) {
+
+    return {
+
+      success: true,
+
+      premium: true,
+
+      unlimited: true,
+
+      remaining: -1,
+
+    };
+
+  }
+
+  const usage = await resetUsageIfNeeded(userId);
+
+  switch (feature) {
+
+    case "questions":
+
+      if (!usage.canUseQuestion()) {
+
+        return {
+
+          success: false,
+
+          premium: false,
+
+          message: "Free question limit reached.",
+
+          remaining: 0,
+
+          resetAt: usage.resetAt,
+
+        };
+
+      }
+
+      usage.consumeQuestion();
+
+      break;
+
+    default:
+
+      return {
+
+        success: false,
+
+        message: "Unknown feature.",
+
+      };
+
+  }
+
+  await usage.save();
+
+  return {
+
+    success: true,
+
+    premium: false,
+
+    remaining: usage.remainingQuestions(),
+
+    resetAt: usage.resetAt,
+
+  };
+
+}
+
+async function createRazorpaySubscription() {
+
+  return await razorpay.subscriptions.create({
+
+    plan_id: SUBSCRIPTION_CONFIG.PLAN_ID,
+
+    total_count: 120,
+
+    quantity: 1,
+
+    customer_notify: 1,
+
+  });
+
+}
+
+app.get("/subscription/status", firebaseAuth, async (req, res) => {
+
+  try {
+
+    const premium = await hasPremiumAccess(req.userId);
+
+    if (premium) {
+
+      const subscription = await getSubscription(req.userId);
+
+      return res.json({
+
+        success: true,
+
+        premium: true,
+
+        status: subscription.status,
+
+        subscription: subscription.toClient(),
+
+        usage: {
+
+          unlimited: true,
+
+          questionsRemaining: -1,
+
+          resetAt: null,
+
+        }
+
+      });
+
+    }
+
+    const usage = await resetUsageIfNeeded(req.userId);
+
+    return res.json({
+
+      success: true,
+
+      premium: false,
+
+      status: "free",
+
+      subscription: null,
+
+      usage: {
+
+        unlimited: false,
+
+        questionsRemaining: usage.remainingQuestions(),
+
+        questionsUsed: usage.freeQuestionsUsed,
+
+        resetAt: usage.resetAt,
+
+      }
+
+    });
+
+  }
+
+  catch (err) {
+
+    return res.status(500).json({
+
+      success: false,
+
+      message: err.message,
+
+    });
+
+  }
+
+});
+
+app.post("/subscription/create", firebaseAuth, async (req, res) => {
+
+  try {
+    const existingSubscription = await getSubscription(req.userId);
+
+    if (
+      existingSubscription &&
+      existingSubscription.isActive()
+    ) {
+
+      return res.json({
+
+        success: true,
+
+        alreadySubscribed: true,
+
+        message: "User already has an active subscription.",
+
+        subscription: existingSubscription.toClient(),
+
+      });
+
+    }
+
+    const razorpaySubscription =
+      await createRazorpaySubscription();
+
+    return res.json({
+
+      success: true,
+
+      alreadySubscribed: false,
+
+      checkout: {
+
+        key: process.env.RAZORPAY_KEY_ID,
+
+        subscriptionId: razorpaySubscription.id,
+
+        status: razorpaySubscription.status,
+
+      }
+
+    });
+
+  }
+
+  catch (err) {
+
+    console.error(err);
+
+    return res.status(500).json({
+
+      success: false,
+
+      message: err.message,
+
+    });
+
+  }
+
+});
+
+app.post("/subscription/verify", firebaseAuth, async (req, res) => {
+
+  try {
+
+    const {
+
+      razorpay_payment_id,
+      razorpay_subscription_id,
+      razorpay_signature,
+      razorpay_response = {}
+
+    } = req.body;
+
+    if (
+      !razorpay_payment_id ||
+      !razorpay_subscription_id ||
+      !razorpay_signature
+    ) {
+
+      return res.status(400).json({
+        success: false,
+        message: "Missing payment information."
+      });
+
+    }
+
+    // --------------------------------------------------
+    // Verify Checkout Signature
+    // --------------------------------------------------
+
+    const verified = verifyCheckoutSignature({
+
+      paymentId: razorpay_payment_id,
+
+      subscriptionId: razorpay_subscription_id,
+
+      signature: razorpay_signature,
+
+    });
+
+    if (!verified) {
+
+      return res.status(400).json({
+
+        success: false,
+
+        message: "Invalid payment signature."
+
+      });
+
+    }
+
+    // --------------------------------------------------
+    // Fetch Latest Subscription From Razorpay
+    // --------------------------------------------------
+
+    const razorpaySubscription =
+      await razorpay.subscriptions.fetch(
+        razorpay_subscription_id
+      );
+
+    if (!razorpaySubscription) {
+
+      return res.status(404).json({
+
+        success: false,
+
+        message: "Subscription not found."
+
+      });
+
+    }
+
+    const conn = getUserDB();
+
+    const Subscription =
+      getSubscriptionModel(conn);
+
+    // --------------------------------------------------
+    // Upsert Subscription
+    // --------------------------------------------------
+
+    const subscription =
+      await Subscription.findOneAndUpdate(
+
+        {
+
+          userId: req.userId,
+
+        },
+
+        {
+
+          $set: {
+
+            provider: SUBSCRIPTION_CONFIG.PROVIDER,
+
+            status: razorpaySubscription.status,
+
+            razorpaySubscriptionId:
+              razorpaySubscription.id,
+
+            razorpayPaymentId:
+              razorpay_payment_id,
+
+            razorpayCustomerId:
+              razorpaySubscription.customer_id || null,
+
+            amount:
+              SUBSCRIPTION_CONFIG.MONTHLY_PRICE,
+
+            currency:
+              SUBSCRIPTION_CONFIG.CURRENCY,
+
+            startedAt:
+              razorpaySubscription.start_at
+                ? new Date(
+                  razorpaySubscription.start_at * 1000
+                )
+                : new Date(),
+
+            currentPeriodStart:
+              razorpaySubscription.current_start
+                ? new Date(
+                  razorpaySubscription.current_start * 1000
+                )
+                : null,
+
+            currentPeriodEnd:
+              razorpaySubscription.current_end
+                ? new Date(
+                  razorpaySubscription.current_end * 1000
+                )
+                : null,
+
+            expiresAt:
+              razorpaySubscription.current_end
+                ? new Date(
+                  razorpaySubscription.current_end * 1000
+                )
+                : null,
+
+            nextBillingAt:
+              razorpaySubscription.charge_at
+                ? new Date(
+                  razorpaySubscription.charge_at * 1000
+                )
+                : null,
+
+            autoRenew:
+              !razorpaySubscription.cancel_at_cycle_end,
+
+            metadata: {
+
+              checkout: razorpay_response,
+
+              verifiedAt: new Date()
+
+            }
+
+          }
+
+        },
+
+        {
+
+          upsert: true,
+
+          new: true,
+
+        }
+
+      );
+
+    const Usage =
+      getUsageModel(conn);
+
+    await Usage.findOneAndUpdate(
+
+      {
+
+        userId: req.userId,
+
+      },
+
+      {
+
+        $setOnInsert: {
+
+          userId: req.userId,
+
+        }
+
+      },
+
+      {
+
+        upsert: true,
+
+      }
+
+    );
+
+    return res.json({
+
+      success: true,
+
+      premium: subscription.isActive(),
+
+      subscription: subscription.toClient()
+
+    });
+
+  }
+
+  catch (err) {
+
+    console.error(err);
+
+    return res.status(500).json({
+
+      success: false,
+
+      message: err.message,
+
+    });
+
+  }
+
+});
+
+app.post(
+  "/razorpay/webhook",
+  express.raw({ type: "application/json" }),
+  async (req, res) => {
+
+    try {
+
+      const signature = req.headers["x-razorpay-signature"];
+
+      const body = req.body.toString();
+
+      const valid = verifyWebhookSignature(
+        body,
+        signature
+      );
+
+      if (!valid) {
+
+        return res.status(400).json({
+          success: false,
+          message: "Invalid webhook signature."
+        });
+
+      }
+
+      const event = JSON.parse(body);
+
+      const eventType = event.event;
+
+      const payload = event.payload || {};
+
+      const subscriptionEntity =
+        payload.subscription?.entity;
+
+      if (!subscriptionEntity) {
+
+        return res.status(200).json({
+          success: true
+        });
+
+      }
+
+      const conn = getUserDB();
+
+      const Subscription =
+        getSubscriptionModel(conn);
+
+      const subscription =
+        await Subscription.findOne({
+
+          razorpaySubscriptionId:
+            subscriptionEntity.id
+
+        });
+
+      if (!subscription) {
+
+        return res.status(200).json({
+          success: true
+        });
+
+      }
+
+      if (
+        subscription.lastWebhookEventId ===
+        event.id
+      ) {
+
+        return res.status(200).json({
+          success: true
+        });
+
+      }
+
+      subscription.status =
+        subscriptionEntity.status;
+
+      subscription.currentPeriodStart =
+        subscriptionEntity.current_start
+          ? new Date(
+            subscriptionEntity.current_start * 1000
+          )
+          : null;
+
+      subscription.currentPeriodEnd =
+        subscriptionEntity.current_end
+          ? new Date(
+            subscriptionEntity.current_end * 1000
+          )
+          : null;
+
+      subscription.expiresAt =
+        subscription.currentPeriodEnd;
+
+      subscription.nextBillingAt =
+        subscriptionEntity.charge_at
+          ? new Date(
+            subscriptionEntity.charge_at * 1000
+          )
+          : null;
+
+      subscription.autoRenew =
+        !subscriptionEntity.cancel_at_cycle_end;
+
+      if (
+        subscriptionEntity.status ===
+        SUBSCRIPTION_STATUS.CANCELLED
+      ) {
+
+        subscription.cancelledAt =
+          new Date();
+
+      }
+
+      subscription.lastWebhookAt =
+        new Date();
+
+      subscription.lastWebhookEventId =
+        event.id;
+
+      subscription.lastWebhookEventType =
+        eventType;
+
+      subscription.metadata = {
+
+        ...subscription.metadata,
+
+        latestWebhook: event
+
+      };
+
+      await subscription.save();
+
+      return res.status(200).json({
+        success: true
+      });
+
+    }
+
+    catch (err) {
+
+      console.error(err);
+
+      return res.status(500).json({
+
+        success: false,
+
+        message: err.message
+
+      });
+
+    }
+
+  }
+);
+
+async function consumeUsage(userId, type) {
+
+  if (await hasPremiumAccess(userId)) {
+
+    return {
+      success: true,
+      premium: true,
+      unlimited: true,
+      remaining: -1,
+      resetAt: null,
+    };
+
+  }
+
+  await resetUsageIfNeeded(userId);
+
+  const conn = getUserDB();
+  const Usage = getUsageModel(conn);
+
+  let field;
+  let limit;
+
+  switch (type) {
+
+    case "question":
+      field = "freeQuestionsUsed";
+      limit = SUBSCRIPTION_CONFIG.FEATURE_LIMITS.questions;
+      break;
+
+    default:
+
+      return {
+        success: false,
+        message: "Unknown usage type."
+      };
+
+  }
+
+  const usage = await Usage.findOneAndUpdate(
+
+    {
+      userId,
+
+      [field]: {
+        $lt: limit
+      }
+
+    },
+
+    {
+      $inc: {
+        [field]: 1
+      },
+
+      $set: {
+
+        ["lastQuestionAt"]: new Date()
+
+      }
+
+    },
+
+    {
+      new: true
+    }
+
+  );
+
+  if (!usage) {
+
+    const latest = await getOrCreateUsage(userId);
+
+    return {
+
+      success: false,
+
+      premium: false,
+
+      subscriptionRequired: true,
+
+      message: "Free question limit reached.",
+
+      remaining: 0,
+
+      resetAt: latest.resetAt,
+
+    };
+
+  }
+
+  const used = usage.freeQuestionsUsed;
+
+  return {
+
+    success: true,
+
+    premium: false,
+
+    unlimited: false,
+
+    remaining: Math.max(
+      limit - used,
+      0
+    ),
+
+    resetAt: usage.resetAt,
+
+    used
+
+  };
+
+}
+
+async function requireUsage(type, req, res, next) {
+
+  try {
+
+    const access = await consumeUsage(
+      req.userId,
+      type
+    );
+
+    if (!access.success) {
+
+      return res.status(403).json({
+
+        success: false,
+
+        subscriptionRequired: true,
+
+        message: access.message,
+
+        usage: {
+
+          premium: false,
+
+          remaining: access.remaining,
+
+          resetAt: access.resetAt,
+
+        }
+
+      });
+
+    }
+
+    req.usage = access;
+
+    next();
+
+  }
+
+  catch (err) {
+
+    console.error(err);
+
+    return res.status(500).json({
+
+      success: false,
+
+      message: err.message,
+
+    });
+
+  }
+
+}
+
+async function requireQuestionAccess(
+  req,
+  res,
+  next
+) {
+
+  return requireUsage(
+    USAGE_TYPES.QUESTION,
+    req,
+    res,
+    next
+  );
+
+}
+
+
+// ** Subscription **
 
 const firebaseAuth = async (req, res, next) => {
   try {
@@ -662,7 +1966,7 @@ async function updateBookmarkCount(userId, delta) {
       { $inc: { bookmarkCount: delta } },
       { upsert: true }
     );
-  } catch (e) {}
+  } catch (e) { }
 }
 
 app.get("/health", (req, res) => {
@@ -739,6 +2043,12 @@ app.post("/profile", firebaseAuth, async (req, res) => {
       { new: true, upsert: true }
     );
 
+    await Usage.findOneAndUpdate(
+      { userId: req.userId },
+      { $setOnInsert: { userId: req.userId } },
+      { upsert: true }
+    );
+
     res.json({ success: true, user });
   } catch (err) {
     if (err?.code === 11000) {
@@ -801,7 +2111,7 @@ app.get("/questions", firebaseAuth, async (req, res) => {
           query.exam = buildExamMatch(userProfile.examType);
           examLabel = userProfile.examType;
         }
-      } catch (e) {}
+      } catch (e) { }
     } else {
       query.exam = buildExamMatch(exam);
       examLabel = exam;
@@ -828,7 +2138,7 @@ app.get("/questions", firebaseAuth, async (req, res) => {
   }
 });
 
-app.get("/questions/random", firebaseAuth, async (req, res) => {
+app.get("/questions/random", firebaseAuth, requireQuestionAccess, async (req, res) => {
   try {
     const { collection = "pcsquestions", exam, subject, topic, year, count = 10 } = req.query;
     const numCount = Math.max(1, Math.min(Number(count) || 10, 100));
@@ -845,7 +2155,7 @@ app.get("/questions/random", firebaseAuth, async (req, res) => {
           query.exam = buildExamMatch(userProfile.examType);
           examLabel = userProfile.examType;
         }
-      } catch (e) {}
+      } catch (e) { }
     } else {
       query.exam = buildExamMatch(exam);
       examLabel = exam;
@@ -861,7 +2171,7 @@ app.get("/questions/random", firebaseAuth, async (req, res) => {
       const AttemptHistory = getAttemptHistoryModel(conn);
       const attemptedDocs = await AttemptHistory.find({ userId: req.userId }, { questionId: 1 }).lean();
       attemptedIds = attemptedDocs.map((d) => d.questionId);
-    } catch (e) {}
+    } catch (e) { }
 
     const model = getQuestionModel(collection);
 
@@ -1000,7 +2310,7 @@ app.post("/test/finish", firebaseAuth, async (req, res) => {
         analytics.recentSessions = analytics.recentSessions.slice(0, 20);
         await analytics.save();
       }
-    } catch (e) {}
+    } catch (e) { }
 
     res.json({
       success: true,
@@ -1250,7 +2560,7 @@ app.get("/bookmarks", firebaseAuth, async (req, res) => {
           for (const q of questions) {
             questionMap.set(`${col}::${q._id}`, q);
           }
-        } catch (e) {}
+        } catch (e) { }
       })
     );
 
@@ -1542,7 +2852,7 @@ const PORT = process.env.PORT || 8080;
 async function startServer() {
   try {
     await connectAllDatabases();
-    app.listen(PORT, () => {});
+    app.listen(PORT, () => { });
   } catch (err) {
     process.exit(1);
   }
