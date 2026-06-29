@@ -562,6 +562,210 @@ function getBookmarkModel(connection) {
   return connection.model("Bookmark", BookmarkSchema);
 }
 
+
+const firebaseAuth = async (req, res, next) => {
+  try {
+    const authHeader = req.headers.authorization;
+    if (!authHeader || !authHeader.startsWith("Bearer ")) {
+      return res.status(401).json({ success: false, message: "No token provided" });
+    }
+    const idToken = authHeader.split("Bearer ")[1];
+    const decodedToken = await admin.auth().verifyIdToken(idToken);
+    req.user = decodedToken;
+    req.userId = decodedToken.uid;
+    next();
+  } catch (error) {
+    return res.status(401).json({ success: false, message: "Invalid or expired token" });
+  }
+};
+
+const IST_OFFSET_MS = 5.5 * 60 * 60 * 1000;
+
+function todayIST() {
+  const ist = new Date(Date.now() + IST_OFFSET_MS);
+  return [
+    ist.getUTCFullYear(),
+    String(ist.getUTCMonth() + 1).padStart(2, "0"),
+    String(ist.getUTCDate()).padStart(2, "0")
+  ].join("-");
+}
+
+function yesterdayIST() {
+  const ist = new Date(Date.now() + IST_OFFSET_MS - 86400000);
+  return [
+    ist.getUTCFullYear(),
+    String(ist.getUTCMonth() + 1).padStart(2, "0"),
+    String(ist.getUTCDate()).padStart(2, "0")
+  ].join("-");
+}
+
+function todayMMDD() {
+  const ist = new Date(Date.now() + IST_OFFSET_MS);
+  return [
+    String(ist.getUTCDate()).padStart(2, "0"),
+    String(ist.getUTCMonth() + 1).padStart(2, "0")
+  ].join("-");
+}
+
+function escapeRegex(str) {
+  return String(str).replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+}
+
+function buildExamMatch(examType) {
+  const keyword = String(examType).trim();
+  return { $regex: new RegExp("^" + escapeRegex(keyword) + "(\\s|$)", "i") };
+}
+
+function updateBreakdown(array, key, isCorrect) {
+  if (!key) return array;
+  const entry = array.find((e) => e.key === key);
+  if (entry) {
+    entry.attempted++;
+    if (isCorrect) entry.correct++;
+    else entry.incorrect++;
+    entry.accuracy = entry.attempted > 0 ? Math.round((entry.correct / entry.attempted) * 100) : 0;
+  } else {
+    array.push({
+      key,
+      attempted: 1,
+      correct: isCorrect ? 1 : 0,
+      incorrect: isCorrect ? 0 : 1,
+      accuracy: isCorrect ? 100 : 0,
+    });
+  }
+  return array;
+}
+
+function computeStrongWeak(subjectAccuracy) {
+  const qualified = subjectAccuracy.filter((s) => s.attempted >= 5);
+  const sorted = [...qualified].sort((a, b) => b.accuracy - a.accuracy);
+  const strongSubjects = sorted.slice(0, 3).filter((s) => s.accuracy >= 70).map((s) => s.key);
+  const weakSubjects = sorted.slice(-3).reverse().filter((s) => s.accuracy < 50).map((s) => s.key);
+  return { strongSubjects, weakSubjects };
+}
+
+function updateStreak(analytics, today, yesterday) {
+  if (analytics.lastStudyDate === today) {
+  } else if (analytics.lastStudyDate === yesterday) {
+    analytics.currentStreak = (analytics.currentStreak || 0) + 1;
+  } else {
+    analytics.currentStreak = 1;
+  }
+  if (analytics.currentStreak > (analytics.longestStreak || 0)) {
+    analytics.longestStreak = analytics.currentStreak;
+  }
+}
+
+async function updateAnalyticsOnSubmit({
+  userId,
+  questionId,
+  questionMeta,
+  selectedOption,
+  isCorrect,
+  isSkipped,
+  marksEarned,
+  timeTakenSeconds,
+  sessionId,
+}) {
+  const conn = getUserDB();
+  const Analytics = getAnalyticsModel(conn);
+  const AttemptHistory = getAttemptHistoryModel(conn);
+  const today = todayIST();
+  const yesterday = yesterdayIST();
+
+  await AttemptHistory.create({
+    userId,
+    questionId,
+    exam: questionMeta?.exam,
+    subject: questionMeta?.subject,
+    topic: questionMeta?.topic,
+    subtopic: questionMeta?.subtopic,
+    paper: questionMeta?.paper,
+    year: questionMeta?.year,
+    difficulty: questionMeta?.difficulty,
+    selectedOption,
+    isCorrect,
+    isSkipped: isSkipped || false,
+    marksEarned,
+    timeTakenSeconds: timeTakenSeconds || 0,
+    sessionId,
+    attemptedAt: new Date(),
+  });
+
+  let analytics = await Analytics.findOne({ userId });
+  if (!analytics) {
+    analytics = new Analytics({ userId });
+  }
+
+  analytics.totalAttempted++;
+  if (isSkipped) analytics.totalSkipped++;
+  else if (isCorrect) analytics.totalCorrect++;
+  else analytics.totalIncorrect++;
+
+  analytics.totalStudyTimeSeconds += timeTakenSeconds || 0;
+  analytics.overallAccuracy = analytics.totalAttempted > 0
+    ? Math.round((analytics.totalCorrect / analytics.totalAttempted) * 100)
+    : 0;
+  analytics.avgResponseTimeSeconds = analytics.totalAttempted > 0
+    ? Math.round(analytics.totalStudyTimeSeconds / analytics.totalAttempted)
+    : 0;
+
+  if (questionMeta?.subject) {
+    updateBreakdown(analytics.subjectAccuracy, questionMeta.subject, isCorrect);
+  }
+  if (questionMeta?.topic) {
+    updateBreakdown(analytics.topicAccuracy, questionMeta.topic, isCorrect);
+  }
+  if (questionMeta?.year) {
+    updateBreakdown(analytics.yearAccuracy, String(questionMeta.year), isCorrect);
+  }
+
+  const { strongSubjects, weakSubjects } = computeStrongWeak(analytics.subjectAccuracy);
+  analytics.strongSubjects = strongSubjects;
+  analytics.weakSubjects = weakSubjects;
+
+  if (analytics.goalResetDate !== today) {
+    analytics.todayAttempted = 0;
+    analytics.goalResetDate = today;
+  }
+  analytics.todayAttempted = (analytics.todayAttempted || 0) + 1;
+
+  updateStreak(analytics, today, yesterday);
+  analytics.lastStudyDate = today;
+
+  const dayEntry = analytics.dailyActivity.find((d) => d.date === today);
+  if (dayEntry) {
+    dayEntry.attempted++;
+    if (isCorrect) dayEntry.correct++;
+    dayEntry.timeSpentSeconds += timeTakenSeconds || 0;
+  } else {
+    analytics.dailyActivity.push({
+      date: today,
+      attempted: 1,
+      correct: isCorrect ? 1 : 0,
+      timeSpentSeconds: timeTakenSeconds || 0,
+    });
+  }
+  if (analytics.dailyActivity.length > 90) {
+    analytics.dailyActivity = analytics.dailyActivity.slice(-90);
+  }
+
+  await analytics.save();
+  return analytics;
+}
+
+async function updateBookmarkCount(userId, delta) {
+  try {
+    const conn = getUserDB();
+    const Analytics = getAnalyticsModel(conn);
+    await Analytics.findOneAndUpdate(
+      { userId },
+      { $inc: { bookmarkCount: delta } },
+      { upsert: true }
+    );
+  } catch (e) { }
+}
+
 // ** Subscription **
 
 const SubscriptionSchema = new mongoose.Schema(
@@ -1765,209 +1969,6 @@ async function requireQuestionAccess(
 
 
 // ** Subscription **
-
-const firebaseAuth = async (req, res, next) => {
-  try {
-    const authHeader = req.headers.authorization;
-    if (!authHeader || !authHeader.startsWith("Bearer ")) {
-      return res.status(401).json({ success: false, message: "No token provided" });
-    }
-    const idToken = authHeader.split("Bearer ")[1];
-    const decodedToken = await admin.auth().verifyIdToken(idToken);
-    req.user = decodedToken;
-    req.userId = decodedToken.uid;
-    next();
-  } catch (error) {
-    return res.status(401).json({ success: false, message: "Invalid or expired token" });
-  }
-};
-
-const IST_OFFSET_MS = 5.5 * 60 * 60 * 1000;
-
-function todayIST() {
-  const ist = new Date(Date.now() + IST_OFFSET_MS);
-  return [
-    ist.getUTCFullYear(),
-    String(ist.getUTCMonth() + 1).padStart(2, "0"),
-    String(ist.getUTCDate()).padStart(2, "0")
-  ].join("-");
-}
-
-function yesterdayIST() {
-  const ist = new Date(Date.now() + IST_OFFSET_MS - 86400000);
-  return [
-    ist.getUTCFullYear(),
-    String(ist.getUTCMonth() + 1).padStart(2, "0"),
-    String(ist.getUTCDate()).padStart(2, "0")
-  ].join("-");
-}
-
-function todayMMDD() {
-  const ist = new Date(Date.now() + IST_OFFSET_MS);
-  return [
-    String(ist.getUTCDate()).padStart(2, "0"),
-    String(ist.getUTCMonth() + 1).padStart(2, "0")
-  ].join("-");
-}
-
-function escapeRegex(str) {
-  return String(str).replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
-}
-
-function buildExamMatch(examType) {
-  const keyword = String(examType).trim();
-  return { $regex: new RegExp("^" + escapeRegex(keyword) + "(\\s|$)", "i") };
-}
-
-function updateBreakdown(array, key, isCorrect) {
-  if (!key) return array;
-  const entry = array.find((e) => e.key === key);
-  if (entry) {
-    entry.attempted++;
-    if (isCorrect) entry.correct++;
-    else entry.incorrect++;
-    entry.accuracy = entry.attempted > 0 ? Math.round((entry.correct / entry.attempted) * 100) : 0;
-  } else {
-    array.push({
-      key,
-      attempted: 1,
-      correct: isCorrect ? 1 : 0,
-      incorrect: isCorrect ? 0 : 1,
-      accuracy: isCorrect ? 100 : 0,
-    });
-  }
-  return array;
-}
-
-function computeStrongWeak(subjectAccuracy) {
-  const qualified = subjectAccuracy.filter((s) => s.attempted >= 5);
-  const sorted = [...qualified].sort((a, b) => b.accuracy - a.accuracy);
-  const strongSubjects = sorted.slice(0, 3).filter((s) => s.accuracy >= 70).map((s) => s.key);
-  const weakSubjects = sorted.slice(-3).reverse().filter((s) => s.accuracy < 50).map((s) => s.key);
-  return { strongSubjects, weakSubjects };
-}
-
-function updateStreak(analytics, today, yesterday) {
-  if (analytics.lastStudyDate === today) {
-  } else if (analytics.lastStudyDate === yesterday) {
-    analytics.currentStreak = (analytics.currentStreak || 0) + 1;
-  } else {
-    analytics.currentStreak = 1;
-  }
-  if (analytics.currentStreak > (analytics.longestStreak || 0)) {
-    analytics.longestStreak = analytics.currentStreak;
-  }
-}
-
-async function updateAnalyticsOnSubmit({
-  userId,
-  questionId,
-  questionMeta,
-  selectedOption,
-  isCorrect,
-  isSkipped,
-  marksEarned,
-  timeTakenSeconds,
-  sessionId,
-}) {
-  const conn = getUserDB();
-  const Analytics = getAnalyticsModel(conn);
-  const AttemptHistory = getAttemptHistoryModel(conn);
-  const today = todayIST();
-  const yesterday = yesterdayIST();
-
-  await AttemptHistory.create({
-    userId,
-    questionId,
-    exam: questionMeta?.exam,
-    subject: questionMeta?.subject,
-    topic: questionMeta?.topic,
-    subtopic: questionMeta?.subtopic,
-    paper: questionMeta?.paper,
-    year: questionMeta?.year,
-    difficulty: questionMeta?.difficulty,
-    selectedOption,
-    isCorrect,
-    isSkipped: isSkipped || false,
-    marksEarned,
-    timeTakenSeconds: timeTakenSeconds || 0,
-    sessionId,
-    attemptedAt: new Date(),
-  });
-
-  let analytics = await Analytics.findOne({ userId });
-  if (!analytics) {
-    analytics = new Analytics({ userId });
-  }
-
-  analytics.totalAttempted++;
-  if (isSkipped) analytics.totalSkipped++;
-  else if (isCorrect) analytics.totalCorrect++;
-  else analytics.totalIncorrect++;
-
-  analytics.totalStudyTimeSeconds += timeTakenSeconds || 0;
-  analytics.overallAccuracy = analytics.totalAttempted > 0
-    ? Math.round((analytics.totalCorrect / analytics.totalAttempted) * 100)
-    : 0;
-  analytics.avgResponseTimeSeconds = analytics.totalAttempted > 0
-    ? Math.round(analytics.totalStudyTimeSeconds / analytics.totalAttempted)
-    : 0;
-
-  if (questionMeta?.subject) {
-    updateBreakdown(analytics.subjectAccuracy, questionMeta.subject, isCorrect);
-  }
-  if (questionMeta?.topic) {
-    updateBreakdown(analytics.topicAccuracy, questionMeta.topic, isCorrect);
-  }
-  if (questionMeta?.year) {
-    updateBreakdown(analytics.yearAccuracy, String(questionMeta.year), isCorrect);
-  }
-
-  const { strongSubjects, weakSubjects } = computeStrongWeak(analytics.subjectAccuracy);
-  analytics.strongSubjects = strongSubjects;
-  analytics.weakSubjects = weakSubjects;
-
-  if (analytics.goalResetDate !== today) {
-    analytics.todayAttempted = 0;
-    analytics.goalResetDate = today;
-  }
-  analytics.todayAttempted = (analytics.todayAttempted || 0) + 1;
-
-  updateStreak(analytics, today, yesterday);
-  analytics.lastStudyDate = today;
-
-  const dayEntry = analytics.dailyActivity.find((d) => d.date === today);
-  if (dayEntry) {
-    dayEntry.attempted++;
-    if (isCorrect) dayEntry.correct++;
-    dayEntry.timeSpentSeconds += timeTakenSeconds || 0;
-  } else {
-    analytics.dailyActivity.push({
-      date: today,
-      attempted: 1,
-      correct: isCorrect ? 1 : 0,
-      timeSpentSeconds: timeTakenSeconds || 0,
-    });
-  }
-  if (analytics.dailyActivity.length > 90) {
-    analytics.dailyActivity = analytics.dailyActivity.slice(-90);
-  }
-
-  await analytics.save();
-  return analytics;
-}
-
-async function updateBookmarkCount(userId, delta) {
-  try {
-    const conn = getUserDB();
-    const Analytics = getAnalyticsModel(conn);
-    await Analytics.findOneAndUpdate(
-      { userId },
-      { $inc: { bookmarkCount: delta } },
-      { upsert: true }
-    );
-  } catch (e) { }
-}
 
 app.get("/health", (req, res) => {
   res.json({ success: true, message: "Server is running" });
