@@ -815,6 +815,7 @@ app.patch("/user/userid", firebaseAuth, async (req, res) => {
 
 app.post('/subscription/create', firebaseAuth, async (req, res) => {
   try {
+    console.log('Creating subscription for user:', req.userId);
     const options = {
       plan_id: process.env.RAZORPAY_MONTHLY_PLAN_ID,
       total_count: 12,
@@ -823,6 +824,9 @@ app.post('/subscription/create', firebaseAuth, async (req, res) => {
     };
 
     const subscription = await razorpay.subscriptions.create(options);
+
+    console.log('Subscription created:', subscription);
+    console.log('Subscription ID:', subscription.id);
 
     res.status(200).json({ success: true, subscription_id: subscription.id });
   } catch (error) {
