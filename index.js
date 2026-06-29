@@ -30,6 +30,11 @@ mongoose.set("bufferCommands", true);
 mongoose.set("bufferTimeoutMS", 30000);
 
 // ** Razorpay **
+const RAZORPAY_KEY_ID = process.env.RAZORPAY_KEY_ID;
+const RAZORPAY_KEY_SECRET = process.env.RAZORPAY_KEY_SECRET;
+//const RAZORPAY_PLAN_ID = process.env.RAZORPAY_PLAN_ID;
+const RAZORPAY_WEBHOOK_SECRET = process.env.RAZORPAY_WEBHOOK_SECRET;
+
 const razorpay = new Razorpay({
   key_id: process.env.RAZORPAY_KEY_ID,
   key_secret: process.env.RAZORPAY_KEY_SECRET,
@@ -325,11 +330,30 @@ const UserSchema = new mongoose.Schema({
     ],
     index: true,
   },
-  // subscription: {
-  //   type: mongoose.Schema.Types.ObjectId,
-  //   ref: "Subscription",
-  //   default: null
-  // },
+  isPremium: {
+    type: Boolean,
+    default: false
+  },
+
+  subscriptionId: {
+    type: String,
+    default: null
+  },
+
+  subscriptionStatus: {
+    type: String,
+    default: null
+  },
+
+  premiumExpiry: {
+    type: Date,
+    default: null
+  },
+
+  lastPaymentId: {
+    type: String,
+    default: null
+  }
 }, { timestamps: true });
 
 
@@ -337,6 +361,95 @@ function getUserModel(connection) {
   if (connection.models.User) return connection.models.User;
   return connection.model("User", UserSchema);
 }
+
+// ** subscription helpers **
+
+function subscriptionIsPremium(user) {
+  return !!user?.isPremium;
+}
+
+async function updatePremiumStatus(userId) {
+
+  const conn = getUserDB();
+  const User = getUserModel(conn);
+
+  const user = await User.findOne({ userId });
+
+  if (!user) return null;
+
+  return {
+    premium: user.isPremium,
+    expiry: user.premiumExpiry,
+    status: user.subscriptionStatus,
+  };
+}
+
+async function fetchSubscription(subscriptionId) {
+  return await razorpay.subscriptions.fetch(subscriptionId);
+}
+
+function verifyWebhookSignature(body, signature) {
+
+  return await razorpay.verifyWebhookSignature(body, signature, RAZORPAY_WEBHOOK_SECRET);
+  // const expected = crypto
+  //   .createHmac("sha256", RAZORPAY_WEBHOOK_SECRET)
+  //   .update(body)
+  //   .digest("hex");
+
+  // return expected === signature;
+}
+
+function mapSubscriptionStatus(status) {
+  switch (status) {
+    case "active":
+    case "authenticated":
+    case "pending":
+      return true;
+
+    default:
+      return false;
+  }
+}
+
+// ======================================================
+// Sync Subscription From Razorpay
+// ======================================================
+
+// ======================================================
+// Sync Subscription Status From Razorpay
+// ======================================================
+
+async function syncSubscription(userId) {
+  const conn = getUserDB();
+  const User = getUserModel(conn);
+
+  const user = await User.findOne({ userId });
+
+  if (!user) {
+    throw new Error("User not found");
+  }
+
+  if (!user.subscriptionId) {
+    throw new Error("No subscription found");
+  }
+
+  const subscription = await razorpay.subscriptions.fetch(
+    user.subscriptionId
+  );
+
+  user.subscriptionStatus = subscription.status;
+
+  await user.save();
+
+  return {
+    premium: user.isPremium,
+    status: user.subscriptionStatus,
+    expiry: user.premiumExpiry,
+    subscriptionId: user.subscriptionId,
+  };
+}
+
+// ** subscription helpers **
 
 function generateUserIDSuggestions(base) {
   const clean = String(base).toLowerCase().replace(/[^a-z0-9_]/g, "").slice(0, 15) || "user";
@@ -818,49 +931,239 @@ app.patch("/user/userid", firebaseAuth, async (req, res) => {
 
 // ** Razorpay **
 
-app.post('/subscription/create', async (req, res) => {
+app.get("/subscription/config", firebaseAuth, async (req, res) => {
   try {
-    console.log('Creating subscription for user:');
-    const options = {
+    res.json({
+      success: true,
+      key: RAZORPAY_KEY_ID,
+      planId: "plan_T7WzcFWbTVDXQe",
+    });
+  } catch (err) {
+    res.status(500).json({
+      success: false,
+      message: err.message,
+    });
+  }
+});
+
+app.post("/subscription/create", firebaseAuth, async (req, res) => {
+  try {
+    console.log("Creating subscription for user:");
+    const conn = getUserDB();
+    const User = getUserModel(conn);
+
+    const user = await User.findOne({ userId: req.userId });
+
+    console.log("User found:", user);
+
+    if (!user) {
+      return res.status(404).json({
+        success: false,
+        message: "User not found",
+      });
+    }
+
+    // Don't create another active subscription
+    if (
+      user.subscriptionId &&
+      ["created", "authenticated", "active", "pending"].includes(
+        user.subscriptionStatus
+      )
+    ) {
+      return res.json({
+        success: true,
+        alreadyExists: true,
+        subscriptionId: user.subscriptionId,
+        status: user.subscriptionStatus,
+      });
+    }
+
+    console.log("Creating new subscription for user:", req.userId);
+
+    const subscription = await razorpay.subscriptions.create({
       plan_id: "plan_T7WzcFWbTVDXQe",
-      total_count: 12,
+      total_count: 0,
       quantity: 1,
       customer_notify: 1,
-    };
+      notes: {
+        firebase_uid: req.userId,
+      },
+    });
 
-    const subscription = await razorpay.subscriptions.create(options);
+    user.subscriptionId = subscription.id;
+    user.subscriptionStatus = subscription.status;
 
-    console.log('Subscription created:', subscription);
-    console.log('Subscription ID:', subscription.id);
+    await user.save();
 
-    res.status(200).json({ success: true, subscription_id: subscription.id });
-  } catch (error) {
-    console.log('Error creating subscription:', error);
-    res.status(500).json({ success: false, error: error.message, details: error });
+    res.json({
+      success: true,
+      subscriptionId: subscription.id,
+      status: subscription.status,
+    });
+  } catch (err) {
+    console.error(err);
+
+    res.status(500).json({
+      success: false,
+      message: err.message,
+    });
   }
 });
 
-app.post('/subscription/verify', firebaseAuth, async (req, res) => {
+// app.post('/subscription/create', async (req, res) => {
+//   try {
+//     console.log('Creating subscription for user:');
+//     const options = {
+//       plan_id: "plan_T7WzcFWbTVDXQe",
+//       total_count: 12,
+//       quantity: 1,
+//       customer_notify: 1,
+//     };
+
+//     const subscription = await razorpay.subscriptions.create(options);
+
+//     console.log('Subscription created:', subscription);
+//     console.log('Subscription ID:', subscription.id);
+
+//     res.status(200).json({ success: true, subscription_id: subscription.id });
+//   } catch (error) {
+//     console.log('Error creating subscription:', error);
+//     res.status(500).json({ success: false, error: error.message, details: error });
+//   }
+// });
+
+app.get("/subscription/status", firebaseAuth, async (req, res) => {
   try {
-    const { razorpay_payment_id, razorpay_subscription_id, razorpay_signature } = req.body;
+    const conn = getUserDB();
+    const User = getUserModel(conn);
 
-    // Generate expected signature
-    const secret = process.env.RAZORPAY_KEY_SECRET;
-    const generatedSignature = crypto
-      .createHmac('sha256', secret)
-      .update(`${razorpay_payment_id}|${razorpay_subscription_id}`)
-      .digest('hex');
+    const user = await User.findOne({ userId: req.userId });
 
-    if (generatedSignature === razorpay_signature) {
-      // TODO: Update subscription status to "ACTIVE" in your database
-      res.status(200).json({ success: true, message: "Subscription verified successfully" });
-    } else {
-      res.status(400).json({ success: false, message: "Invalid signature verification failed" });
+    if (!user) {
+      return res.json({
+        success: true,
+        premium: false,
+      });
     }
-  } catch (error) {
-    res.status(500).json({ success: false, error: error.message });
+
+    const premium = user.isPremium;
+
+    res.json({
+      success: true,
+
+      premium: user.isPremium,
+
+      status: user.subscriptionStatus,
+
+      expiry: user.premiumExpiry,
+
+      subscriptionId: user.subscriptionId,
+    });
+  } catch (err) {
+    res.status(500).json({
+      success: false,
+      message: err.message,
+    });
   }
 });
+
+// ======================================================
+// Refresh Subscription
+// ======================================================
+
+app.post(
+  "/subscription/refresh",
+  firebaseAuth,
+  async (req, res) => {
+    try {
+      const result = await syncSubscription(req.userId);
+
+      res.json({
+        success: true,
+        ...result,
+      });
+
+    } catch (err) {
+
+      console.error(err);
+
+      res.status(500).json({
+        success: false,
+        message: err.message,
+      });
+
+    }
+  }
+);
+
+
+app.post(
+  "/subscription/verify",
+  firebaseAuth,
+  async (req, res) => {
+    try {
+      const {
+        razorpay_payment_id,
+        razorpay_subscription_id,
+        razorpay_signature,
+      } = req.body;
+
+      const generated = crypto
+        .createHmac(
+          "sha256",
+          RAZORPAY_KEY_SECRET
+        )
+        .update(
+          razorpay_payment_id +
+            "|" +
+            razorpay_subscription_id
+        )
+        .digest("hex");
+
+      if (generated !== razorpay_signature) {
+        return res.status(400).json({
+          success: false,
+          message: "Invalid signature",
+        });
+      }
+
+      res.json({
+        success: true,
+      });
+    } catch (err) {
+      res.status(500).json({
+        success: false,
+        message: err.message,
+      });
+    }
+  }
+);
+
+// app.post('/subscription/verify', firebaseAuth, async (req, res) => {
+//   try {
+//     const { razorpay_payment_id, razorpay_subscription_id, razorpay_signature } = req.body;
+
+//     console.log('Verifying subscription for user:', req.userId);
+
+//     // Generate expected signature
+//     const secret = process.env.RAZORPAY_KEY_SECRET;
+//     const generatedSignature = crypto
+//       .createHmac('sha256', secret)
+//       .update(`${razorpay_payment_id}|${razorpay_subscription_id}`)
+//       .digest('hex');
+
+//     if (generatedSignature === razorpay_signature) {
+
+//       console.log('Subscription verified successfully for user:');
+//       // TODO: Update subscription status to "ACTIVE" in your database
+//       res.status(200).json({ success: true, message: "Subscription verified successfully" });
+//     } else {
+//       res.status(400).json({ success: false, message: "Invalid signature verification failed" });
+//     }
+//   } catch (error) {
+//     res.status(500).json({ success: false, error: error.message });
+//   }
+// });
 
 // ** Razorpay **
 
@@ -1608,6 +1911,148 @@ app.get("/today-in-past/:id", firebaseAuth, async (req, res) => {
     res.status(500).json({ success: false, message: err.message });
   }
 });
+
+// Razorpay Webhook
+
+app.post(
+  "/subscription/webhook",
+  express.raw({ type: "application/json" }),
+  async (req, res) => {
+    try {
+      const signature = req.headers["x-razorpay-signature"];
+
+      const body = req.body.toString();
+
+      if (!verifyWebhookSignature(body, signature)) {
+        return res.status(400).json({
+          success: false,
+          message: "Invalid webhook signature",
+        });
+      }
+
+      const payload = JSON.parse(body);
+
+      const event = payload.event;
+
+      const subscription =
+        payload.payload?.subscription?.entity;
+
+      if (!subscription) {
+        return res.json({ success: true });
+      }
+
+      const conn = getUserDB();
+      const User = getUserModel(conn);
+
+      let user = null;
+
+      const firebaseUid =
+        subscription.notes?.firebase_uid;
+
+      if (firebaseUid) {
+        user = await User.findOne({
+          userId: firebaseUid,
+        });
+      }
+
+      if (!user) {
+        user = await User.findOne({
+          subscriptionId: subscription.id,
+        });
+      }
+
+      if (!user) {
+        return res.json({
+          success: true,
+          message: "User not found",
+        });
+      }
+
+      user.subscriptionId = subscription.id;
+      user.subscriptionStatus = subscription.status;
+
+      switch (event) {
+
+        case "subscription.activated":
+
+          user.isPremium = true;
+
+          break;
+
+        case "subscription.charged":
+
+          user.isPremium = true;
+
+          if (subscription.current_end) {
+            user.premiumExpiry = new Date(
+              subscription.current_end * 1000
+            );
+          }
+
+          if (
+            payload.payload.payment &&
+            payload.payload.payment.entity
+          ) {
+            user.lastPaymentId =
+              payload.payload.payment.entity.id;
+          }
+
+          break;
+
+        case "subscription.completed":
+
+          user.isPremium = false;
+
+          break;
+
+        case "subscription.cancelled":
+
+          user.isPremium = false;
+
+          break;
+
+        case "subscription.halted":
+
+          user.isPremium = false;
+
+          break;
+
+        case "subscription.paused":
+
+          user.isPremium = false;
+
+          break;
+
+        case "payment.failed":
+
+          user.isPremium = false;
+
+          break;
+
+        default:
+          break;
+      }
+
+      await user.save();
+
+      return res.json({
+        success: true,
+      });
+
+    } catch (err) {
+
+      console.error(err);
+
+      return res.status(500).json({
+        success: false,
+        message: err.message,
+      });
+
+    }
+  }
+);
+
+// ** razorpay webhook **
 
 app.use((req, res) => {
   res.status(404).json({ success: false, message: "Route not found" });
