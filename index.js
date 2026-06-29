@@ -835,6 +835,7 @@ app.post('/subscription/create', firebaseAuth, async (req, res) => {
 
     res.status(200).json({ success: true, subscription_id: subscription.id });
   } catch (error) {
+    console.log('Error creating subscription:', error);
     res.status(500).json({ success: false, error: error.message });
   }
 });
