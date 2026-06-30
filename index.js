@@ -42,7 +42,7 @@ mongoose.set("bufferTimeoutMS", 30000);
 // ** Razorpay **
 const RAZORPAY_KEY_ID = process.env.RAZORPAY_KEY_ID;
 const RAZORPAY_KEY_SECRET = process.env.RAZORPAY_KEY_SECRET;
-//const RAZORPAY_PLAN_ID = process.env.RAZORPAY_PLAN_ID;
+const RAZORPAY_PLAN_ID = process.env.RAZORPAY_PLAN_ID;
 const RAZORPAY_WEBHOOK_SECRET = process.env.RAZORPAY_WEBHOOK_SECRET;
 
 const razorpay = new Razorpay({
@@ -50,10 +50,6 @@ const razorpay = new Razorpay({
   key_secret: process.env.RAZORPAY_KEY_SECRET,
 });
 // **Razorpay **
-
-console.log("Connecting to MongoDB databases...");
-
-log("Connecting to MongoDB databases... log");
 
 const COMMON_OPTIONS = {
   serverSelectionTimeoutMS: 30000,
@@ -947,7 +943,7 @@ app.get("/subscription/config", firebaseAuth, async (req, res) => {
     res.json({
       success: true,
       key: RAZORPAY_KEY_ID,
-      planId: "plan_T7WzcFWbTVDXQe",
+      planId: RAZORPAY_PLAN_ID,
     });
   } catch (err) {
     res.status(500).json({
@@ -959,13 +955,10 @@ app.get("/subscription/config", firebaseAuth, async (req, res) => {
 
 app.post("/subscription/create", firebaseAuth, async (req, res) => {
   try {
-    console.log("Creating subscription for user:");
     const conn = getUserDB();
     const User = getUserModel(conn);
 
     const user = await User.findOne({ userId: req.userId });
-
-    console.log("User found:", user);
 
     if (!user) {
       return res.status(404).json({
@@ -975,25 +968,42 @@ app.post("/subscription/create", firebaseAuth, async (req, res) => {
     }
 
     // Don't create another active subscription
-    if (
-      user.subscriptionId &&
-      ["created", "authenticated", "active", "pending"].includes(
-        user.subscriptionStatus
-      )
-    ) {
-      return res.json({
-        success: true,
-        alreadyExists: true,
-        subscriptionId: user.subscriptionId,
-        status: user.subscriptionStatus,
-        key: RAZORPAY_KEY_ID,
-      });
+    if (user.subscriptionId) {
+      try {
+        const existing = await razorpay.subscriptions.fetch(
+          user.subscriptionId
+        );
+
+        // Keep local DB in sync
+        user.subscriptionStatus = existing.status;
+        await user.save();
+
+        const reusableStatuses = [
+          "created",
+          "authenticated",
+          "active",
+          "pending",
+        ];
+
+        if (reusableStatuses.includes(existing.status)) {
+          return res.json({
+            success: true,
+            alreadyExists: true,
+            subscriptionId: existing.id,
+            status: existing.status,
+            key: RAZORPAY_KEY_ID,
+          });
+        }
+      } catch (e) {
+        return res.json({
+          success: false,
+          error: e,
+        })
+      }
     }
 
-    console.log("Creating new subscription for user:", req.userId);
-
     const subscription = await razorpay.subscriptions.create({
-      plan_id: "plan_T7WzcFWbTVDXQe",
+      plan_id: RAZORPAY_PLAN_ID,
       total_count: 120,
       quantity: 1,
       customer_notify: 1,
@@ -1022,28 +1032,6 @@ app.post("/subscription/create", firebaseAuth, async (req, res) => {
     });
   }
 });
-
-// app.post('/subscription/create', async (req, res) => {
-//   try {
-//     console.log('Creating subscription for user:');
-//     const options = {
-//       plan_id: "plan_T7WzcFWbTVDXQe",
-//       total_count: 12,
-//       quantity: 1,
-//       customer_notify: 1,
-//     };
-
-//     const subscription = await razorpay.subscriptions.create(options);
-
-//     console.log('Subscription created:', subscription);
-//     console.log('Subscription ID:', subscription.id);
-
-//     res.status(200).json({ success: true, subscription_id: subscription.id });
-//   } catch (error) {
-//     console.log('Error creating subscription:', error);
-//     res.status(500).json({ success: false, error: error.message, details: error });
-//   }
-// });
 
 app.get("/subscription/status", firebaseAuth, async (req, res) => {
   try {
@@ -1093,8 +1081,6 @@ app.post(
       });
 
     } catch (err) {
-
-      console.error(err);
 
       res.status(500).json({
         success: false,
@@ -1146,32 +1132,6 @@ app.post(
     }
   }
 );
-
-// app.post('/subscription/verify', firebaseAuth, async (req, res) => {
-//   try {
-//     const { razorpay_payment_id, razorpay_subscription_id, razorpay_signature } = req.body;
-
-//     console.log('Verifying subscription for user:', req.userId);
-
-//     // Generate expected signature
-//     const secret = process.env.RAZORPAY_KEY_SECRET;
-//     const generatedSignature = crypto
-//       .createHmac('sha256', secret)
-//       .update(`${razorpay_payment_id}|${razorpay_subscription_id}`)
-//       .digest('hex');
-
-//     if (generatedSignature === razorpay_signature) {
-
-//       console.log('Subscription verified successfully for user:');
-//       // TODO: Update subscription status to "ACTIVE" in your database
-//       res.status(200).json({ success: true, message: "Subscription verified successfully" });
-//     } else {
-//       res.status(400).json({ success: false, message: "Invalid signature verification failed" });
-//     }
-//   } catch (error) {
-//     res.status(500).json({ success: false, error: error.message });
-//   }
-// });
 
 // ** Razorpay **
 
@@ -2010,18 +1970,24 @@ app.post(
         case "subscription.completed":
 
           user.isPremium = false;
+          user.subscriptionId = null;
+          user.subscriptionStatus = null;
 
           break;
 
         case "subscription.cancelled":
 
           user.isPremium = false;
+          user.subscriptionId = null;
+          user.subscriptionStatus = null;
 
           break;
 
         case "subscription.halted":
 
           user.isPremium = false;
+          user.subscriptionId = null;
+          user.subscriptionStatus = null;
 
           break;
 
