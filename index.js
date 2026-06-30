@@ -24,7 +24,17 @@ app.use(cors({
   allowedHeaders: ["Content-Type", "Authorization"]
 }));
 
-app.use(express.json({ limit: "10mb" }));
+app.use(
+  express.json({
+    limit: "10mb",
+
+    verify: (req, res, buf) => {
+      if (req.originalUrl === "/subscription/webhook") {
+        req.rawBody = buf.toString("utf8");
+      }
+    },
+  })
+);
 app.use(express.urlencoded({ extended: true }));
 mongoose.set("bufferCommands", true);
 mongoose.set("bufferTimeoutMS", 30000);
@@ -388,15 +398,16 @@ async function fetchSubscription(subscriptionId) {
   return await razorpay.subscriptions.fetch(subscriptionId);
 }
 
-async function verifyWebhookSignature(body, signature) {
+function verifyWebhookSignature(rawBody, signature) {
+  const expected = crypto
+    .createHmac("sha256", RAZORPAY_WEBHOOK_SECRET)
+    .update(rawBody)
+    .digest("hex");
 
-  return await razorpay.verifyWebhookSignature(body, signature, RAZORPAY_WEBHOOK_SECRET);
-  // const expected = crypto
-  //   .createHmac("sha256", RAZORPAY_WEBHOOK_SECRET)
-  //   .update(body)
-  //   .digest("hex");
-
-  // return expected === signature;
+  return crypto.timingSafeEqual(
+    Buffer.from(expected),
+    Buffer.from(signature)
+  );
 }
 
 function mapSubscriptionStatus(status) {
@@ -975,6 +986,7 @@ app.post("/subscription/create", firebaseAuth, async (req, res) => {
         alreadyExists: true,
         subscriptionId: user.subscriptionId,
         status: user.subscriptionStatus,
+        key: RAZORPAY_KEY_ID,
       });
     }
 
@@ -999,6 +1011,7 @@ app.post("/subscription/create", firebaseAuth, async (req, res) => {
       success: true,
       subscriptionId: subscription.id,
       status: subscription.status,
+      key: RAZORPAY_KEY_ID,
     });
   } catch (err) {
     console.error(err);
@@ -1067,10 +1080,6 @@ app.get("/subscription/status", firebaseAuth, async (req, res) => {
   }
 });
 
-// ======================================================
-// Refresh Subscription
-// ======================================================
-
 app.post(
   "/subscription/refresh",
   firebaseAuth,
@@ -1095,7 +1104,6 @@ app.post(
     }
   }
 );
-
 
 app.post(
   "/subscription/verify",
@@ -1916,21 +1924,21 @@ app.get("/today-in-past/:id", firebaseAuth, async (req, res) => {
 
 app.post(
   "/subscription/webhook",
-  express.raw({ type: "application/json" }),
   async (req, res) => {
     try {
       const signature = req.headers["x-razorpay-signature"];
 
-      const body = req.body.toString();
-
-      if (!verifyWebhookSignature(body, signature)) {
+      if (
+        !signature ||
+        !verifyWebhookSignature(req.rawBody, signature)
+      ) {
         return res.status(400).json({
           success: false,
           message: "Invalid webhook signature",
         });
       }
 
-      const payload = JSON.parse(body);
+      const payload = req.body;
 
       const event = payload.event;
 
