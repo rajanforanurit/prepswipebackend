@@ -419,13 +419,6 @@ function mapSubscriptionStatus(status) {
   }
 }
 
-// ======================================================
-// Sync Subscription From Razorpay
-// ======================================================
-
-// ======================================================
-// Sync Subscription Status From Razorpay
-// ======================================================
 
 async function syncSubscription(userId) {
   const conn = getUserDB();
