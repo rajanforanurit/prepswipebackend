@@ -1488,10 +1488,11 @@ app.get("/leaderboard/global", async (req, res) => {
     console.log("Leaderboard UIDs:", uids);
     const profiles = await User.find({ userId: { $in: uids } }, { userId: 1, userID: 1, name: 1 }).lean();
     console.log("Fetched Profiles:", profiles);
-    const profileMap = new Map(profiles.map((p) => [p.userId, p]));
+    const profileMap = new Map(profiles.map((p) => [p.userId.toLowerCase(), p]));
     const publicLeaderboard = leaderboard.map((entry, i) => {
-      const profile = profileMap.get(entry.userId);
+      const profile = profileMap.get(entry.userId.toLowerCase());
       console.log(`Mapping entry for userId: ${entry.userId}, profile found: ${!!profile}`);
+
       return {
         rank: i + 1,
         userID: profile?.userID || "anonymous",
