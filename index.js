@@ -1652,28 +1652,24 @@ app.delete("/bookmark/:questionId", firebaseAuth, async (req, res) => {
   }
 });
 
-app.get("/current-affairs", firebaseAuth, async (req, res) => {
+app.get("/current-affairs", async (req, res) => {
   try {
     const { limit = 20, skip = 0, subject, date, search } = req.query;
-
     const CurrentAffair = getCAModel();
     const filter = {};
     if (subject) filter.subject = subject;
     if (date) filter.date = date;
     if (search) filter.title = { $regex: search, $options: "i" };
-
     const [items, total] = await Promise.all([
       CurrentAffair.find(filter).sort({ date: -1, createdAt: -1 }).skip(Number(skip)).limit(Number(limit)).lean(),
       CurrentAffair.countDocuments(filter)
     ]);
-
     res.json({ success: true, total, count: items.length, data: items });
   } catch (err) {
     res.status(500).json({ success: false, message: err.message });
   }
 });
-
-app.get("/current-affairs/subjects", firebaseAuth, async (req, res) => {
+app.get("/current-affairs/subjects", async (req, res) => {
   try {
     const CurrentAffair = getCAModel();
     const subjects = await CurrentAffair.distinct("subject");
@@ -1682,8 +1678,7 @@ app.get("/current-affairs/subjects", firebaseAuth, async (req, res) => {
     res.status(500).json({ success: false, message: err.message });
   }
 });
-
-app.get("/current-affairs/:id", firebaseAuth, async (req, res) => {
+app.get("/current-affairs/:id", async (req, res) => {
   try {
     const CurrentAffair = getCAModel();
     const item = await CurrentAffair.findById(req.params.id).lean();
