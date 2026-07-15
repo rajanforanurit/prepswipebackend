@@ -1266,34 +1266,88 @@ async function fetchRandomQuestions({
   topic,
   count,
 }) {
+  try {
+    const { collection = "pcsquestions", exam, subject, topic, year, count = count } = req.query;
+    const numCount = Math.max(1, Math.min(Number(count) || 10, 100));
 
-  const Question =
-    getQuestionModel(collection);
+    const query = {};
+    let examLabel = "all";
+    const Question =
+      getQuestionModel(collection);
 
-  const match = {};
+    if (!exam) {
+      try {
+        const userConnLocal = getUserDB();
+        const User = getUserModel(userConnLocal);
+        const userProfile = await User.findOne({ userId: req.userId });
+        if (userProfile?.examType) {
+          query.exam = buildExamMatch(userProfile.examType);
+          examLabel = userProfile.examType;
+        }
+      } catch (e) { }
+    } else {
+      query.exam = buildExamMatch(exam);
+      examLabel = exam;
+    }
 
-  if (exam) {
-    match.exam = buildExamMatch(exam);
+    if (subject) query.subject = subject;
+    if (topic) query.topic = topic;
+    if (year) query.year = Number(year);
+
+    let attemptedIds = [];
+    try {
+      const conn = getUserDB();
+      const AttemptHistory = getAttemptHistoryModel(conn);
+      const attemptedDocs = await AttemptHistory.find({ userId: req.userId }, { questionId: 1 }).lean();
+      attemptedIds = attemptedDocs.map((d) => d.questionId);
+    } catch (e) { }
+
+    const model = getQuestionModel(collection);
+
+    const baseMatch = { ...query };
+    let excludeMatch = { ...baseMatch };
+    if (attemptedIds.length > 0) {
+      excludeMatch._id = { $nin: attemptedIds };
+    }
+
+    let questions = await model.aggregate([
+      { $match: excludeMatch },
+      { $sample: { size: numCount } },
+    ]);
+
+    let usedFallback = false;
+    if (questions.length < numCount) {
+      usedFallback = true;
+      const stillNeeded = numCount - questions.length;
+      const alreadyPickedIds = questions.map((q) => q._id);
+      const fallbackMatch = { ...baseMatch };
+      if (alreadyPickedIds.length > 0) {
+        fallbackMatch._id = { $nin: alreadyPickedIds };
+      }
+      const fallbackQuestions = await model.aggregate([
+        { $match: fallbackMatch },
+        { $sample: { size: stillNeeded } },
+      ]);
+      questions = [...questions, ...fallbackQuestions];
+    }
+
+    res.json({
+      questions,
+    });
+  } catch (err) {
+    res.status(500).json({ success: false, message: err.message });
   }
 
-  if (subject) {
-    match.subject = subject;
-  }
-
-  if (topic) {
-    match.topic = topic;
-  }
-
-  return await Question.aggregate([
-    {
-      $match: match,
-    },
-    {
-      $sample: {
-        size: count,
-      },
-    },
-  ]);
+  // return await Question.aggregate([
+  //   {
+  //     $match: match,
+  //   },
+  //   {
+  //     $sample: {
+  //       size: count,
+  //     },
+  //   },
+  // ]);
 
 }
 
