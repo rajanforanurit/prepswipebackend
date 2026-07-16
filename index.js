@@ -688,7 +688,7 @@ const ChallengeSchema = new mongoose.Schema(
         "bookmarks",
         "wrong",
       ],
-      default: "RANDOM",
+      default: "random",
     },
 
     questionCount: {
@@ -1264,91 +1264,28 @@ async function fetchRandomQuestions({
   exam,
   subject,
   topic,
-  count,
+  count = 10,
 }) {
-  try {
-    const { collection = "pcsquestions", exam, subject, topic, year, count = count } = req.query;
-    const numCount = Math.max(1, Math.min(Number(count) || 10, 100));
+  const numCount = Math.max(1, Math.min(Number(count) || 10, 100));
+  const model = getQuestionModel(collection);
 
-    const query = {};
-    let examLabel = "all";
-    const Question =
-      getQuestionModel(collection);
-
-    if (!exam) {
-      try {
-        const userConnLocal = getUserDB();
-        const User = getUserModel(userConnLocal);
-        const userProfile = await User.findOne({ userId: req.userId });
-        if (userProfile?.examType) {
-          query.exam = buildExamMatch(userProfile.examType);
-          examLabel = userProfile.examType;
-        }
-      } catch (e) { }
-    } else {
-      query.exam = buildExamMatch(exam);
-      examLabel = exam;
-    }
-
-    if (subject) query.subject = subject;
-    if (topic) query.topic = topic;
-    if (year) query.year = Number(year);
-
-    let attemptedIds = [];
-    try {
-      const conn = getUserDB();
-      const AttemptHistory = getAttemptHistoryModel(conn);
-      const attemptedDocs = await AttemptHistory.find({ userId: req.userId }, { questionId: 1 }).lean();
-      attemptedIds = attemptedDocs.map((d) => d.questionId);
-    } catch (e) { }
-
-    const model = getQuestionModel(collection);
-
-    const baseMatch = { ...query };
-    let excludeMatch = { ...baseMatch };
-    if (attemptedIds.length > 0) {
-      excludeMatch._id = { $nin: attemptedIds };
-    }
-
-    let questions = await model.aggregate([
-      { $match: excludeMatch },
-      { $sample: { size: numCount } },
-    ]);
-
-    let usedFallback = false;
-    if (questions.length < numCount) {
-      usedFallback = true;
-      const stillNeeded = numCount - questions.length;
-      const alreadyPickedIds = questions.map((q) => q._id);
-      const fallbackMatch = { ...baseMatch };
-      if (alreadyPickedIds.length > 0) {
-        fallbackMatch._id = { $nin: alreadyPickedIds };
-      }
-      const fallbackQuestions = await model.aggregate([
-        { $match: fallbackMatch },
-        { $sample: { size: stillNeeded } },
-      ]);
-      questions = [...questions, ...fallbackQuestions];
-    }
-
-    res.json({
-      questions,
-    });
-  } catch (err) {
-    res.status(500).json({ success: false, message: err.message });
+  const query = {};
+  if (exam) {
+    query.exam = buildExamMatch(exam);
+  }
+  if (subject) {
+    query.subject = subject;
+  }
+  if (topic) {
+    query.topic = topic;
   }
 
-  // return await Question.aggregate([
-  //   {
-  //     $match: match,
-  //   },
-  //   {
-  //     $sample: {
-  //       size: count,
-  //     },
-  //   },
-  // ]);
+  const questions = await model.aggregate([
+    { $match: query },
+    { $sample: { size: numCount } },
+  ]);
 
+  return questions;
 }
 
 async function fetchManualQuestions({
@@ -1679,32 +1616,33 @@ app.post(
 
       let participantDocument = null;
 
-      if (questionSource === "random") {
-
-        selectedQuestions =
-          await fetchRandomQuestions({
-            collection,
-            exam,
-            subject,
-            topic,
-            count: Number(questionCount),
-          });
-
-      } else if (questionSource === "manual") {
-        selectedQuestions =
-          await fetchManualQuestions({
-            collection,
-            questionIds,
-          });
-
-      } else {
-
-        return res.status(400).json({
-          success: false,
-          message:
-            "Question source not supported yet.",
+      // Prioritize client-provided questionIds (supports both client-side random and manual selections)
+      if (Array.isArray(questionIds) && questionIds.length > 0) {
+        selectedQuestions = await fetchManualQuestions({
+          collection,
+          questionIds,
         });
 
+        if (selectedQuestions.length !== questionIds.length) {
+          return res.status(400).json({
+            success: false,
+            message: "Some selected questions do not exist in the database.",
+          });
+        }
+      } else if (questionSource === "random") {
+        // Fallback: If no explicit IDs are sent but source is random, fetch on the backend
+        selectedQuestions = await fetchRandomQuestions({
+          collection,
+          exam,
+          subject,
+          topic,
+          count: Number(questionCount),
+        });
+      } else {
+        return res.status(400).json({
+          success: false,
+          message: "Manual mode requires a valid list of questionIds.",
+        });
       }
 
       if (
@@ -1718,28 +1656,6 @@ app.post(
         });
       }
 
-      if (
-        "manual" &&
-        selectedQuestions.length !== questionIds.length
-      ) {
-        return res.status(400).json({
-          success: false,
-          message:
-            "Some selected questions do not exist.",
-        });
-      }
-
-      if (
-        "random" &&
-        selectedQuestions.length < questionCount
-      ) {
-        return res.status(400).json({
-          success: false,
-          message:
-            `Only ${selectedQuestions.length} matching questions are available.`,
-        });
-      }
-
       const challengeQuestions =
         selectedQuestions.map((question, index) => ({
           questionId: question._id,
@@ -1747,6 +1663,7 @@ app.post(
           marks: 1,
           negativeMarks: 0,
         }));
+
 
       challengeDocument = await Challenge.create({
         inviteCode,
