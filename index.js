@@ -598,6 +598,58 @@ function getBookmarkModel(connection) {
   return connection.model("Bookmark", BookmarkSchema);
 }
 
+// ** Community Rooms Schemas **
+
+const RoomParticipantSchema = new mongoose.Schema({
+  userId: { type: String, required: true },
+  userID: { type: String }, // User's custom profile ID/username
+  name: { type: String },
+  score: { type: Number, default: 0 },
+  timeTakenSeconds: { type: Number, default: 0 },
+  completedAt: { type: Date, default: null },
+  status: { type: String, enum: ["joined", "completed"], default: "joined" }
+}, { _id: false });
+
+const RoomSchema = new mongoose.Schema({
+  roomId: {
+    type: String,
+    unique: true,
+    required: true,
+    trim: true,
+    index: true
+  },
+  hostId: { type: String, required: true },
+  title: { type: String, required: true, trim: true },
+  examType: { type: String },
+  subject: { type: String },
+  collectionName: { type: String, default: "pcsquestions" },
+  questionSelection: { type: String, enum: ["random", "specified"], default: "random" },
+  questions: [{ type: mongoose.Schema.Types.Mixed }], // Array of locked question _ids
+  maxParticipants: { type: Number, default: null }, // Null means unlimited
+  isPrivate: { type: Boolean, default: false },
+  password: { type: String, default: null },
+  status: { type: String, enum: ["active", "completed", "cancelled"], default: "active" },
+  participants: [RoomParticipantSchema]
+}, { timestamps: true });
+
+function getRoomModel(connection) {
+  if (connection.models.Room) return connection.models.Room;
+  return connection.model("Room", RoomSchema);
+}
+
+// ** Community Rooms Helpers **
+
+function generateRoomId() {
+  const chars = "ABCDEFGHJKLMNOPQRSTUVWXYZ23456789"; // Removed ambiguous chars like I, O, 1, 0
+  let id = "";
+  for (let i = 0; i < 6; i++) {
+    id += chars.charAt(Math.floor(Math.random() * chars.length));
+  }
+  return id;
+}
+
+// ** Community Rooms Helpers **
+
 
 const firebaseAuth = async (req, res, next) => {
   try {
@@ -1652,6 +1704,343 @@ app.delete("/bookmark/:questionId", firebaseAuth, async (req, res) => {
   }
 });
 
+// ** Custom Multiplayer Rooms API **
+
+// Create custom room
+app.post("/rooms/create", firebaseAuth, async (req, res) => {
+  try {
+    const {
+      title,
+      examType,
+      subject,
+      collectionName = "pcsquestions",
+      questionSelection = "random",
+      questionCount = 10,
+      specifiedQuestionIds,
+      isPrivate = false,
+      password,
+      maxParticipants
+    } = req.body;
+
+    if (!title) {
+      return res.status(400).json({ success: false, message: "Room title is required" });
+    }
+
+    const validCollections = ["pcsquestions", "bookquestions", "paragraphquestions"];
+    if (!validCollections.includes(collectionName)) {
+      return res.status(400).json({
+        success: false,
+        message: `collectionName must be one of: ${validCollections.join(", ")}`
+      });
+    }
+
+    const userConnLocal = getUserDB();
+    const User = getUserModel(userConnLocal);
+    const Room = getRoomModel(userConnLocal);
+
+    // Fetch Host profile to populate their details
+    const hostUser = await User.findOne({ userId: req.userId });
+    if (!hostUser) {
+      return res.status(404).json({ success: false, message: "Host user profile not found" });
+    }
+
+    let lockedQuestionIds = [];
+
+    if (questionSelection === "random") {
+      const query = {};
+      if (examType) query.exam = buildExamMatch(examType);
+      if (subject) query.subject = subject;
+
+      const model = getQuestionModel(collectionName);
+      const limitCount = Math.max(1, Math.min(Number(questionCount) || 10, 50));
+
+      // Retrieve random question IDs to lock them for all participants
+      const sample = await model.aggregate([
+        { $match: query },
+        { $sample: { size: limitCount } },
+        { $project: { _id: 1 } }
+      ]);
+
+      lockedQuestionIds = sample.map(q => q._id);
+
+      if (lockedQuestionIds.length === 0) {
+        return res.status(400).json({
+          success: false,
+          message: "No questions match your subject/examType filters. Please adjust them."
+        });
+      }
+    } else {
+      if (!Array.isArray(specifiedQuestionIds) || specifiedQuestionIds.length === 0) {
+        return res.status(400).json({
+          success: false,
+          message: "specifiedQuestionIds array is required when choosing specified selection"
+        });
+      }
+      lockedQuestionIds = specifiedQuestionIds;
+    }
+
+    // Generate unique room ID
+    let roomId = generateRoomId();
+    let isUnique = false;
+    let attempts = 0;
+    while (!isUnique && attempts < 5) {
+      const existing = await Room.findOne({ roomId });
+      if (!existing) {
+        isUnique = true;
+      } else {
+        roomId = generateRoomId();
+        attempts++;
+      }
+    }
+
+    const hostParticipant = {
+      userId: req.userId,
+      userID: hostUser.userID || "anonymous",
+      name: hostUser.name || "Host",
+      status: "joined"
+    };
+
+    const room = await Room.create({
+      roomId,
+      hostId: req.userId,
+      title: title.trim(),
+      examType: examType || null,
+      subject: subject || null,
+      collectionName,
+      questionSelection,
+      questions: lockedQuestionIds,
+      maxParticipants: maxParticipants ? Number(maxParticipants) : null,
+      isPrivate: !!isPrivate,
+      password: isPrivate && password ? String(password).trim() : null,
+      status: "active",
+      participants: [hostParticipant]
+    });
+
+    res.status(201).json({
+      success: true,
+      roomId,
+      room,
+      shareLink: `https://prepswipe.com/rooms/${roomId}` // Adapt to your app's deep link routing
+    });
+  } catch (err) {
+    res.status(500).json({ success: false, message: err.message });
+  }
+});
+
+// Join custom room (via Room ID & optional Password / Shared Link)
+app.post("/rooms/join", firebaseAuth, async (req, res) => {
+  try {
+    const { roomId, password } = req.body;
+    const requestedRoomId = String(roomId || "").trim().toUpperCase();
+
+    if (!requestedRoomId) {
+      return res.status(400).json({ success: false, message: "Room ID is required" });
+    }
+
+    const userConnLocal = getUserDB();
+    const Room = getRoomModel(userConnLocal);
+    const User = getUserModel(userConnLocal);
+
+    const room = await Room.findOne({ roomId: requestedRoomId });
+    if (!room) {
+      return res.status(404).json({ success: false, message: "Quiz room not found" });
+    }
+
+    if (room.status !== "active") {
+      return res.status(400).json({ success: false, message: "This room is no longer active" });
+    }
+
+    // Check credentials if private
+    if (room.isPrivate) {
+      if (room.password && room.password !== String(password || "").trim()) {
+        return res.status(401).json({ success: false, message: "Incorrect room password" });
+      }
+    }
+
+    // Limit participants verification
+    if (room.maxParticipants && room.participants.length >= room.maxParticipants) {
+      const isAlreadyParticipant = room.participants.some(p => p.userId === req.userId);
+      if (!isAlreadyParticipant) {
+        return res.status(403).json({ success: false, message: "This room has reached its participant limit" });
+      }
+    }
+
+    // Add user as participant if not already present
+    let participantInfo = room.participants.find(p => p.userId === req.userId);
+    if (!participantInfo) {
+      const profile = await User.findOne({ userId: req.userId });
+      participantInfo = {
+        userId: req.userId,
+        userID: profile?.userID || "anonymous",
+        name: profile?.name || "Participant",
+        status: "joined"
+      };
+      room.participants.push(participantInfo);
+      await room.save();
+    }
+
+    // Fetch full questions locked for this room
+    const model = getQuestionModel(room.collectionName);
+    const questionsData = await model.find({ _id: { $in: room.questions } }).lean();
+
+    // Keep correct ordering corresponding to room's configured order
+    const questionMap = new Map(questionsData.map(q => [String(q._id), q]));
+    const orderedQuestions = room.questions.map(id => questionMap.get(String(id))).filter(Boolean);
+
+    res.json({
+      success: true,
+      room,
+      questions: orderedQuestions
+    });
+  } catch (err) {
+    res.status(500).json({ success: false, message: err.message });
+  }
+});
+
+// Submit/finish custom room quiz
+app.post("/rooms/:roomId/submit", firebaseAuth, async (req, res) => {
+  try {
+    const { roomId } = req.params;
+    const { attempts } = req.body; // Array of { questionId, selectedOption, isCorrect, timeTakenSeconds, questionMeta }
+
+    if (!Array.isArray(attempts) || attempts.length === 0) {
+      return res.status(400).json({ success: false, message: "Attempts list is required to evaluate performance" });
+    }
+
+    const userConnLocal = getUserDB();
+    const Room = getRoomModel(userConnLocal);
+
+    const room = await Room.findOne({ roomId: String(roomId).toUpperCase() });
+    if (!room) {
+      return res.status(404).json({ success: false, message: "Quiz room not found" });
+    }
+
+    const participant = room.participants.find(p => p.userId === req.userId);
+    if (!participant) {
+      return res.status(403).json({ success: false, message: "You are not registered in this quiz room" });
+    }
+
+    if (participant.status === "completed") {
+      return res.status(400).json({ success: false, message: "You have already completed this custom room quiz" });
+    }
+
+    const sessionUUID = `room-${room.roomId}-${Date.now()}`;
+    let totalScore = 0;
+    let totalTime = 0;
+
+    for (const a of attempts) {
+      const isCorrect = !!a.isCorrect;
+      const isSkipped = !!a.isSkipped;
+      const marksEarned = isCorrect
+        ? (a.questionMeta?.marks || 2)
+        : (isSkipped ? 0 : -(a.questionMeta?.negativeMarks || 0));
+
+      totalScore += marksEarned;
+      totalTime += a.timeTakenSeconds || 0;
+
+      // Dynamically updates global analytics and attempt history concurrently
+      await updateAnalyticsOnSubmit({
+        userId: req.userId,
+        questionId: a.questionId,
+        questionMeta: a.questionMeta || {},
+        selectedOption: a.selectedOption,
+        isCorrect,
+        isSkipped,
+        marksEarned,
+        timeTakenSeconds: a.timeTakenSeconds || 0,
+        sessionId: sessionUUID
+      });
+    }
+
+    participant.score = Math.round(totalScore * 100) / 100;
+    participant.timeTakenSeconds = totalTime;
+    participant.completedAt = new Date();
+    participant.status = "completed";
+
+    await room.save();
+
+    // Construct sorted leaderboard
+    const roomLeaderboard = [...room.participants].sort((a, b) => {
+      if (a.status !== "completed" && b.status === "completed") return 1;
+      if (a.status === "completed" && b.status !== "completed") return -1;
+      if (a.score !== b.score) return b.score - a.score;
+      return a.timeTakenSeconds - b.timeTakenSeconds;
+    });
+
+    res.json({
+      success: true,
+      score: participant.score,
+      timeTakenSeconds: participant.timeTakenSeconds,
+      leaderboard: roomLeaderboard
+    });
+  } catch (err) {
+    res.status(500).json({ success: false, message: err.message });
+  }
+});
+
+// Fetch active public rooms (for Community lobby feed)
+app.get("/rooms/active", firebaseAuth, async (req, res) => {
+  try {
+    const { subject, examType, limit = 20, skip = 0 } = req.query;
+    const userConnLocal = getUserDB();
+    const Room = getRoomModel(userConnLocal);
+
+    const query = { isPrivate: false, status: "active" };
+    if (subject) query.subject = String(subject);
+    if (examType) query.examType = String(examType);
+
+    const [rooms, total] = await Promise.all([
+      Room.find(query)
+        .sort({ createdAt: -1 })
+        .skip(Number(skip))
+        .limit(Number(limit))
+        .lean(),
+      Room.countDocuments(query)
+    ]);
+
+    res.json({
+      success: true,
+      total,
+      count: rooms.length,
+      rooms
+    });
+  } catch (err) {
+    res.status(500).json({ success: false, message: err.message });
+  }
+});
+
+// Fetch room leaderboard/details directly (for deep links and dynamic routing validation)
+app.get("/rooms/:roomId", firebaseAuth, async (req, res) => {
+  try {
+    const { roomId } = req.params;
+    const userConnLocal = getUserDB();
+    const Room = getRoomModel(userConnLocal);
+
+    const room = await Room.findOne({ roomId: String(roomId).toUpperCase() }).lean();
+    if (!room) {
+      return res.status(404).json({ success: false, message: "Quiz room not found" });
+    }
+
+    // Sort leaderboard ranking
+    const sortedLeaderboard = [...room.participants].sort((a, b) => {
+      if (a.status !== "completed" && b.status === "completed") return 1;
+      if (a.status === "completed" && b.status !== "completed") return -1;
+      if (a.score !== b.score) return b.score - a.score;
+      return a.timeTakenSeconds - b.timeTakenSeconds;
+    });
+
+    res.json({
+      success: true,
+      room: {
+        ...room,
+        participants: sortedLeaderboard
+      }
+    });
+  } catch (err) {
+    res.status(500).json({ success: false, message: err.message });
+  }
+});
+
 app.get("/current-affairs", async (req, res) => {
   try {
     const { limit = 20, skip = 0, subject, date, search } = req.query;
@@ -2056,4 +2445,5 @@ module.exports = {
   getAnalyticsModel,
   getAttemptHistoryModel,
   getBookmarkModel,
+  getRoomModel,
 };
