@@ -6,7 +6,6 @@ const admin = require("firebase-admin");
 const crypto = require("crypto");
 const cors = require("cors");
 const { log } = require("console");
-const { type } = require("os");
 
 if (!admin.apps.length) {
   try {
@@ -39,10 +38,6 @@ app.use(
 app.use(express.urlencoded({ extended: true }));
 mongoose.set("bufferCommands", true);
 mongoose.set("bufferTimeoutMS", 30000);
-
-const APP_BASE_URL =
-  process.env.APP_BASE_URL ||
-  "https://prepswipe.app";
 
 // ** Razorpay **
 const RAZORPAY_KEY_ID = process.env.RAZORPAY_KEY_ID;
@@ -584,7 +579,7 @@ const BookmarkSchema = new mongoose.Schema({
     type: mongoose.Schema.Types.Mixed,
     required: true,
   },
-  collectionname: {
+  collection: {
     type: String,
     required: true,
     enum: ["pcsquestions", "bookquestions", "paragraphquestions"],
@@ -596,7 +591,7 @@ const BookmarkSchema = new mongoose.Schema({
   },
 }, { timestamps: false });
 
-BookmarkSchema.index({ userId: 1, questionId: 1, collectionname: 1 }, { unique: true });
+BookmarkSchema.index({ userId: 1, questionId: 1, collection: 1 }, { unique: true });
 
 function getBookmarkModel(connection) {
   if (connection.models.Bookmark) return connection.models.Bookmark;
@@ -1134,6 +1129,894 @@ app.post(
 
 // ** Razorpay **
 
+app.get("/questions", firebaseAuth, async (req, res) => {
+  try {
+    const { collection = "pcsquestions", exam, subject, topic, year, limit = 50, skip = 0 } = req.query;
+
+    const query = {};
+    let examLabel = "all";
+
+    if (!exam) {
+      try {
+        const conn = getUserDB();
+        const User = getUserModel(conn);
+        const userProfile = await User.findOne({ userId: req.userId });
+        if (userProfile?.examType) {
+          query.exam = buildExamMatch(userProfile.examType);
+          examLabel = userProfile.examType;
+        }
+      } catch (e) { }
+    } else {
+      query.exam = buildExamMatch(exam);
+      examLabel = exam;
+    }
+
+    if (subject) query.subject = subject;
+    if (topic) query.topic = topic;
+    if (year) query.year = Number(year);
+
+    const model = getQuestionModel(collection);
+    const questions = await model.find(query)
+      .skip(Number(skip))
+      .limit(Number(limit))
+      .lean();
+
+    res.json({
+      success: true,
+      count: questions.length,
+      exam: examLabel,
+      questions
+    });
+  } catch (err) {
+    res.status(500).json({ success: false, message: err.message });
+  }
+});
+
+app.get("/questions/random", firebaseAuth, async (req, res) => {
+  try {
+    const { collection = "pcsquestions", exam, subject, topic, year, count = 10 } = req.query;
+    const numCount = Math.max(1, Math.min(Number(count) || 10, 100));
+
+    const query = {};
+    let examLabel = "all";
+
+    if (!exam) {
+      try {
+        const userConnLocal = getUserDB();
+        const User = getUserModel(userConnLocal);
+        const userProfile = await User.findOne({ userId: req.userId });
+        if (userProfile?.examType) {
+          query.exam = buildExamMatch(userProfile.examType);
+          examLabel = userProfile.examType;
+        }
+      } catch (e) { }
+    } else {
+      query.exam = buildExamMatch(exam);
+      examLabel = exam;
+    }
+
+    if (subject) query.subject = subject;
+    if (topic) query.topic = topic;
+    if (year) query.year = Number(year);
+
+    let attemptedIds = [];
+    try {
+      const conn = getUserDB();
+      const AttemptHistory = getAttemptHistoryModel(conn);
+      const attemptedDocs = await AttemptHistory.find({ userId: req.userId }, { questionId: 1 }).lean();
+      attemptedIds = attemptedDocs.map((d) => d.questionId);
+    } catch (e) { }
+
+    const model = getQuestionModel(collection);
+
+    const baseMatch = { ...query };
+    let excludeMatch = { ...baseMatch };
+    if (attemptedIds.length > 0) {
+      excludeMatch._id = { $nin: attemptedIds };
+    }
+
+    let questions = await model.aggregate([
+      { $match: excludeMatch },
+      { $sample: { size: numCount } },
+    ]);
+
+    let usedFallback = false;
+    if (questions.length < numCount) {
+      usedFallback = true;
+      const stillNeeded = numCount - questions.length;
+      const alreadyPickedIds = questions.map((q) => q._id);
+      const fallbackMatch = { ...baseMatch };
+      if (alreadyPickedIds.length > 0) {
+        fallbackMatch._id = { $nin: alreadyPickedIds };
+      }
+      const fallbackQuestions = await model.aggregate([
+        { $match: fallbackMatch },
+        { $sample: { size: stillNeeded } },
+      ]);
+      questions = [...questions, ...fallbackQuestions];
+    }
+
+    res.json({
+      success: true,
+      count: questions.length,
+      exam: examLabel,
+      exhaustedPool: usedFallback,
+      questions,
+    });
+  } catch (err) {
+    res.status(500).json({ success: false, message: err.message });
+  }
+});
+
+app.post("/attempt/submit", firebaseAuth, async (req, res) => {
+  try {
+    const { questionId, selectedOption, isCorrect, isSkipped, timeTakenSeconds, sessionId, questionMeta } = req.body;
+    await updateAnalyticsOnSubmit({
+      userId: req.userId,
+      questionId,
+      questionMeta: questionMeta || {},
+      selectedOption,
+      isCorrect: !!isCorrect,
+      isSkipped: !!isSkipped,
+      marksEarned: isCorrect ? (questionMeta?.marks || 2) : 0,
+      timeTakenSeconds: timeTakenSeconds || 0,
+      sessionId,
+    });
+    res.json({ success: true, message: "Attempt saved successfully" });
+  } catch (err) {
+    res.status(500).json({ success: false, message: err.message });
+  }
+});
+
+app.post("/test/finish", firebaseAuth, async (req, res) => {
+  try {
+    const { sessionId, attempts } = req.body;
+    if (!Array.isArray(attempts) || attempts.length === 0) {
+      return res.status(400).json({ success: false, message: "attempts array is required" });
+    }
+
+    const finalSessionId = sessionId || `session-${Date.now()}`;
+    let correct = 0;
+    let incorrect = 0;
+    let skipped = 0;
+    let totalMarks = 0;
+    let totalTimeSeconds = 0;
+    const subjectTally = {};
+
+    for (const a of attempts) {
+      const isCorrect = !!a.isCorrect;
+      const isSkipped = !!a.isSkipped;
+      const marksEarned = isCorrect
+        ? (a.questionMeta?.marks || 2)
+        : (isSkipped ? 0 : -(a.questionMeta?.negativeMarks || 0));
+
+      await updateAnalyticsOnSubmit({
+        userId: req.userId,
+        questionId: a.questionId,
+        questionMeta: a.questionMeta || {},
+        selectedOption: a.selectedOption,
+        isCorrect,
+        isSkipped,
+        marksEarned,
+        timeTakenSeconds: a.timeTakenSeconds || 0,
+        sessionId: finalSessionId,
+      });
+
+      if (isSkipped) skipped++;
+      else if (isCorrect) correct++;
+      else incorrect++;
+
+      totalMarks += marksEarned;
+      totalTimeSeconds += a.timeTakenSeconds || 0;
+
+      const subj = a.questionMeta?.subject || "General";
+      if (!subjectTally[subj]) subjectTally[subj] = { attempted: 0, correct: 0 };
+      subjectTally[subj].attempted++;
+      if (isCorrect) subjectTally[subj].correct++;
+    }
+
+    const total = attempts.length;
+    const accuracy = total > 0 ? Math.round((correct / total) * 100) : 0;
+
+    const subjectBreakdown = Object.entries(subjectTally).map(([subject, v]) => ({
+      subject,
+      attempted: v.attempted,
+      correct: v.correct,
+      accuracy: v.attempted > 0 ? Math.round((v.correct / v.attempted) * 100) : 0,
+    }));
+
+    try {
+      const conn = getUserDB();
+      const Analytics = getAnalyticsModel(conn);
+      const analytics = await Analytics.findOne({ userId: req.userId });
+      if (analytics) {
+        analytics.recentSessions = analytics.recentSessions || [];
+        analytics.recentSessions.unshift({
+          sessionId: finalSessionId,
+          score: Math.round(totalMarks * 100) / 100,
+          total,
+          correct,
+          incorrect,
+          accuracy,
+          timeTakenSeconds: totalTimeSeconds,
+          finishedAt: new Date(),
+        });
+        analytics.recentSessions = analytics.recentSessions.slice(0, 20);
+        await analytics.save();
+      }
+    } catch (e) { }
+
+    res.json({
+      success: true,
+      sessionId: finalSessionId,
+      result: {
+        total,
+        correct,
+        incorrect,
+        skipped,
+        accuracy,
+        totalMarks: Math.round(totalMarks * 100) / 100,
+        timeTakenSeconds: totalTimeSeconds,
+        subjectBreakdown,
+      },
+    });
+  } catch (err) {
+    res.status(500).json({ success: false, message: err.message });
+  }
+});
+
+app.get("/user/profile", firebaseAuth, async (req, res) => {
+  try {
+    const conn = getUserDB();
+    const User = getUserModel(conn);
+    const Analytics = getAnalyticsModel(conn);
+    const [user, analytics] = await Promise.all([
+      User.findOne({ userId: req.userId }),
+      Analytics.findOne({ userId: req.userId })
+    ]);
+    res.json({
+      success: true,
+      profile: user || { userId: req.userId },
+      analytics: analytics || {
+        totalAttempted: 0,
+        totalCorrect: 0,
+        totalIncorrect: 0,
+        overallAccuracy: 0,
+        currentStreak: 0,
+        longestStreak: 0,
+        subjectAccuracy: [],
+        recentSessions: [],
+      }
+    });
+  } catch (err) {
+    res.status(500).json({ success: false, message: err.message });
+  }
+});
+
+app.patch("/user/profile", firebaseAuth, async (req, res) => {
+  try {
+    const conn = getUserDB();
+    const User = getUserModel(conn);
+    const updates = { ...req.body };
+    delete updates.userId;
+    delete updates.userID;
+    const user = await User.findOneAndUpdate(
+      { userId: req.userId },
+      { $set: updates },
+      { new: true, upsert: true }
+    );
+    res.json({ success: true, user });
+  } catch (err) {
+    res.status(500).json({ success: false, message: err.message });
+  }
+});
+
+app.get("/user/overall-rank", firebaseAuth, async (req, res) => {
+  try {
+    const conn = getUserDB();
+    const AttemptHistory = getAttemptHistoryModel(conn);
+    const User = getUserModel(conn);
+    const [userAttempts, userProfile] = await Promise.all([
+      AttemptHistory.find({ userId: req.userId }).lean(),
+      User.findOne({ userId: req.userId }).lean(),
+    ]);
+    if (userAttempts.length === 0) {
+      return res.json({
+        success: true,
+        hasRank: false,
+        message: "Complete at least one test to see your rank.",
+        totalMarks: 0,
+        totalCorrect: 0,
+        attempts: 0,
+      });
+    }
+    let totalMarks = 0;
+    let totalCorrect = 0;
+    userAttempts.forEach(a => {
+      totalCorrect += a.isCorrect ? 1 : 0;
+      totalMarks += a.isCorrect ? (a.marksEarned || 2) : 0;
+    });
+    const betterUsers = await AttemptHistory.aggregate([
+      {
+        $group: {
+          _id: "$userId",
+          totalMarks: { $sum: { $cond: [{ $eq: ["$isCorrect", true] }, { $ifNull: ["$marksEarned", 2] }, 0] } }
+        }
+      },
+      { $match: { totalMarks: { $gt: totalMarks } } },
+      { $count: "count" }
+    ]);
+    const rank = (betterUsers[0]?.count || 0) + 1;
+    const totalParticipants = await AttemptHistory.distinct("userId").then(ids => new Set(ids).size);
+    res.json({
+      success: true,
+      hasRank: true,
+      userID: userProfile?.userID || null,
+      name: userProfile?.name || null,
+      rank,
+      totalMarks: Math.round(totalMarks * 100) / 100,
+      totalCorrect,
+      attempts: userAttempts.length,
+      totalParticipants,
+      percentile: totalParticipants > 0 ? Math.round(((totalParticipants - rank) / totalParticipants) * 100) : 0
+    });
+  } catch (err) {
+    res.status(500).json({ success: false, message: err.message });
+  }
+});
+
+app.get("/leaderboard/global", async (req, res) => {
+  try {
+    const conn = getUserDB();
+    const AttemptHistory = getAttemptHistoryModel(conn);
+    const User = getUserModel(conn);
+    const limit = parseInt(req.query.limit) || 50;
+    const leaderboard = await AttemptHistory.aggregate([
+      {
+        $group: {
+          _id: "$userId",
+          totalMarks: { $sum: { $cond: [{ $eq: ["$isCorrect", true] }, { $ifNull: ["$marksEarned", 2] }, 0] } },
+          totalCorrect: { $sum: { $cond: [{ $eq: ["$isCorrect", true] }, 1, 0] } },
+          attempts: { $sum: 1 }
+        }
+      },
+      { $sort: { totalMarks: -1 } },
+      { $limit: limit },
+      { $project: { userId: "$_id", totalMarks: 1, totalCorrect: 1, attempts: 1, rank: { $literal: 0 } } }
+    ]);
+    const uids = leaderboard.map((entry) => entry.userId);
+    const profiles = await User.find({ userId: { $in: uids } }, { userId: 1, userID: 1, name: 1 }).lean();
+    const profileMap = new Map(profiles.map((p) => [p.userId.toLowerCase(), p]));
+    const publicLeaderboard = leaderboard.map((entry, i) => {
+      const profile = profileMap.get(entry.userId.toLowerCase());
+      return {
+        rank: i + 1,
+        userID: profile?.userID || "anonymous",
+        name: profile?.name || null,
+        totalMarks: entry.totalMarks,
+        totalCorrect: entry.totalCorrect,
+        attempts: entry.attempts,
+      };
+    });
+    res.json({
+      success: true,
+      leaderboard: publicLeaderboard,
+      totalParticipants: await AttemptHistory.distinct("userId").then(ids => new Set(ids).size)
+    });
+  } catch (err) {
+    res.status(500).json({ success: false, message: err.message });
+  }
+});
+
+app.post("/bookmark", firebaseAuth, async (req, res) => {
+  try {
+    const { questionId, collection: col = "pcsquestions" } = req.body;
+
+    if (!questionId) {
+      return res.status(400).json({ success: false, message: "questionId is required" });
+    }
+
+    const validCollections = ["pcsquestions", "bookquestions", "paragraphquestions"];
+    if (!validCollections.includes(col)) {
+      return res.status(400).json({
+        success: false,
+        message: `collection must be one of: ${validCollections.join(", ")}`,
+      });
+    }
+
+    const conn = getUserDB();
+    const Bookmark = getBookmarkModel(conn);
+
+    const existing = await Bookmark.findOne({
+      userId: req.userId,
+      questionId,
+      collection: col,
+    }).lean();
+
+    if (existing) {
+      return res.status(409).json({
+        success: false,
+        message: "Question is already bookmarked",
+        bookmark: existing,
+      });
+    }
+
+    const bookmark = await Bookmark.create({
+      userId: req.userId,
+      questionId,
+      collection: col,
+      bookmarkedAt: new Date(),
+    });
+
+    await updateBookmarkCount(req.userId, 1);
+
+    res.status(201).json({ success: true, bookmark });
+  } catch (err) {
+    if (err?.code === 11000) {
+      return res.status(409).json({ success: false, message: "Question is already bookmarked" });
+    }
+    res.status(500).json({ success: false, message: err.message });
+  }
+});
+
+app.get("/bookmarks", firebaseAuth, async (req, res) => {
+  try {
+    const { collection: colFilter, limit = 50, skip = 0 } = req.query;
+
+    const conn = getUserDB();
+    const Bookmark = getBookmarkModel(conn);
+
+    const bookmarkQuery = { userId: req.userId };
+    if (colFilter) bookmarkQuery.collection = colFilter;
+
+    const bookmarks = await Bookmark.find(bookmarkQuery)
+      .sort({ bookmarkedAt: -1 })
+      .skip(Number(skip))
+      .limit(Number(limit))
+      .lean();
+
+    if (bookmarks.length === 0) {
+      return res.json({ success: true, count: 0, bookmarks: [] });
+    }
+
+    const byCollection = {};
+    for (const bm of bookmarks) {
+      if (!byCollection[bm.collection]) byCollection[bm.collection] = [];
+      byCollection[bm.collection].push(bm.questionId);
+    }
+
+    const questionMap = new Map();
+    await Promise.all(
+      Object.entries(byCollection).map(async ([col, ids]) => {
+        try {
+          const model = getQuestionModel(col);
+          const questions = await model.find({ _id: { $in: ids } }).lean();
+          for (const q of questions) {
+            questionMap.set(`${col}::${q._id}`, q);
+          }
+        } catch (e) { }
+      })
+    );
+
+    const enrichedBookmarks = bookmarks.map((bm) => ({
+      bookmarkId: bm._id,
+      bookmarkedAt: bm.bookmarkedAt,
+      collection: bm.collection,
+      question: questionMap.get(`${bm.collection}::${bm.questionId}`) || null,
+    }));
+
+    res.json({
+      success: true,
+      count: enrichedBookmarks.length,
+      bookmarks: enrichedBookmarks,
+    });
+  } catch (err) {
+    res.status(500).json({ success: false, message: err.message });
+  }
+});
+
+app.delete("/bookmark/:questionId", firebaseAuth, async (req, res) => {
+  try {
+    const { questionId } = req.params;
+    const col = req.query.collection || "pcsquestions";
+
+    const conn = getUserDB();
+    const Bookmark = getBookmarkModel(conn);
+
+    let deleted = await Bookmark.findOneAndDelete({
+      userId: req.userId,
+      questionId,
+      collection: col,
+    });
+
+    if (!deleted) {
+      const numericId = Number(questionId);
+      if (!isNaN(numericId)) {
+        deleted = await Bookmark.findOneAndDelete({
+          userId: req.userId,
+          questionId: numericId,
+          collection: col,
+        });
+      }
+    }
+
+    if (!deleted) {
+      return res.status(404).json({ success: false, message: "Bookmark not found" });
+    }
+
+    await updateBookmarkCount(req.userId, -1);
+
+    res.json({ success: true, message: "Bookmark removed successfully" });
+  } catch (err) {
+    res.status(500).json({ success: false, message: err.message });
+  }
+});
+
+app.get("/current-affairs", async (req, res) => {
+  try {
+    const { limit = 20, skip = 0, subject, date, search } = req.query;
+    const CurrentAffair = getCAModel();
+    const filter = {};
+    if (subject) filter.subject = subject;
+    if (date) filter.date = date;
+    if (search) filter.title = { $regex: search, $options: "i" };
+    const [items, total] = await Promise.all([
+      CurrentAffair.find(filter).sort({ date: -1, createdAt: -1 }).skip(Number(skip)).limit(Number(limit)).lean(),
+      CurrentAffair.countDocuments(filter)
+    ]);
+    res.json({ success: true, total, count: items.length, data: items });
+  } catch (err) {
+    res.status(500).json({ success: false, message: err.message });
+  }
+});
+app.get("/current-affairs/subjects", async (req, res) => {
+  try {
+    const CurrentAffair = getCAModel();
+    const subjects = await CurrentAffair.distinct("subject");
+    res.json({ success: true, subjects: subjects.sort() });
+  } catch (err) {
+    res.status(500).json({ success: false, message: err.message });
+  }
+});
+app.get("/current-affairs/:id", async (req, res) => {
+  try {
+    const CurrentAffair = getCAModel();
+    const item = await CurrentAffair.findById(req.params.id).lean();
+    if (!item) return res.status(404).json({ success: false, message: "Current affair not found" });
+    res.json({ success: true, data: item });
+  } catch (err) {
+    res.status(500).json({ success: false, message: err.message });
+  }
+});
+
+app.get("/important-topics", firebaseAuth, async (req, res) => {
+  try {
+    const { limit = 20, skip = 0, subject, search } = req.query;
+
+    const ImportantTopic = getITModel();
+    const filter = {};
+    if (subject) filter.subject = subject;
+    if (search) filter.title = { $regex: search, $options: "i" };
+
+    const [items, total] = await Promise.all([
+      ImportantTopic.find(filter).sort({ createdAt: -1 }).skip(Number(skip)).limit(Number(limit)).lean(),
+      ImportantTopic.countDocuments(filter)
+    ]);
+
+    res.json({ success: true, total, count: items.length, data: items });
+  } catch (err) {
+    res.status(500).json({ success: false, message: err.message });
+  }
+});
+
+app.get("/important-topics/subjects", firebaseAuth, async (req, res) => {
+  try {
+    const ImportantTopic = getITModel();
+    const subjects = await ImportantTopic.distinct("subject");
+    res.json({ success: true, subjects: subjects.sort() });
+  } catch (err) {
+    res.status(500).json({ success: false, message: err.message });
+  }
+});
+
+app.get("/important-topics/:id", firebaseAuth, async (req, res) => {
+  try {
+    const ImportantTopic = getITModel();
+    const item = await ImportantTopic.findById(req.params.id).lean();
+    if (!item) return res.status(404).json({ success: false, message: "Important topic not found" });
+    res.json({ success: true, data: item });
+  } catch (err) {
+    res.status(500).json({ success: false, message: err.message });
+  }
+});
+
+app.get("/did-you-know", firebaseAuth, async (req, res) => {
+  try {
+    const { limit = 20, skip = 0, subject, search } = req.query;
+
+    const DidYouKnow = getDYKModel();
+    const filter = {};
+    if (subject) filter.subject = subject;
+    if (search) filter.question = { $regex: search, $options: "i" };
+
+    const [items, total] = await Promise.all([
+      DidYouKnow.find(filter).sort({ createdAt: -1 }).skip(Number(skip)).limit(Number(limit)).lean(),
+      DidYouKnow.countDocuments(filter)
+    ]);
+
+    res.json({ success: true, total, count: items.length, data: items });
+  } catch (err) {
+    res.status(500).json({ success: false, message: err.message });
+  }
+});
+
+app.get("/did-you-know/random", firebaseAuth, async (req, res) => {
+  try {
+    const { subject, count = 1 } = req.query;
+    const numCount = Math.max(1, Math.min(Number(count) || 1, 50));
+
+    const DidYouKnow = getDYKModel();
+    const match = {};
+    if (subject) match.subject = subject;
+
+    const items = await DidYouKnow.aggregate([
+      { $match: match },
+      { $sample: { size: numCount } },
+    ]);
+
+    res.json({ success: true, count: items.length, data: items });
+  } catch (err) {
+    res.status(500).json({ success: false, message: err.message });
+  }
+});
+
+app.get("/did-you-know/subjects", firebaseAuth, async (req, res) => {
+  try {
+    const DidYouKnow = getDYKModel();
+    const subjects = await DidYouKnow.distinct("subject");
+    res.json({ success: true, subjects: subjects.sort() });
+  } catch (err) {
+    res.status(500).json({ success: false, message: err.message });
+  }
+});
+
+app.get("/did-you-know/:id", firebaseAuth, async (req, res) => {
+  try {
+    const DidYouKnow = getDYKModel();
+    const item = await DidYouKnow.findById(req.params.id).lean();
+    if (!item) return res.status(404).json({ success: false, message: "Did You Know item not found" });
+    res.json({ success: true, data: item });
+  } catch (err) {
+    res.status(500).json({ success: false, message: err.message });
+  }
+});
+
+app.get("/today-in-past/today", firebaseAuth, async (req, res) => {
+  try {
+    const TodayInPast = getTIPModel();
+    const mmdd = todayMMDD();
+
+    const [items, total] = await Promise.all([
+      TodayInPast.find({ date: mmdd }).sort({ year: 1 }).lean(),
+      TodayInPast.countDocuments({ date: mmdd })
+    ]);
+
+    res.json({ success: true, date: mmdd, total, count: items.length, data: items });
+  } catch (err) {
+    res.status(500).json({ success: false, message: err.message });
+  }
+});
+
+app.get("/today-in-past/subjects", firebaseAuth, async (req, res) => {
+  try {
+    const TodayInPast = getTIPModel();
+    const subjects = await TodayInPast.distinct("subject");
+    res.json({ success: true, subjects: subjects.sort() });
+  } catch (err) {
+    res.status(500).json({ success: false, message: err.message });
+  }
+});
+
+app.get("/today-in-past/random", firebaseAuth, async (req, res) => {
+  try {
+    const { subject, count = 5 } = req.query;
+    const numCount = Math.max(1, Math.min(Number(count) || 5, 50));
+
+    const TodayInPast = getTIPModel();
+    const match = {};
+    if (subject) match.subject = subject;
+
+    const items = await TodayInPast.aggregate([
+      { $match: match },
+      { $sample: { size: numCount } },
+    ]);
+
+    res.json({ success: true, count: items.length, data: items });
+  } catch (err) {
+    res.status(500).json({ success: false, message: err.message });
+  }
+});
+
+app.get("/today-in-past", firebaseAuth, async (req, res) => {
+  try {
+    const { limit = 20, skip = 0, subject, date, search } = req.query;
+
+    const TodayInPast = getTIPModel();
+    const filter = {};
+    if (subject) filter.subject = subject;
+    if (date) filter.date = date;
+    if (search) filter.event = { $regex: search, $options: "i" };
+
+    const [items, total] = await Promise.all([
+      TodayInPast.find(filter).sort({ date: 1, year: 1 }).skip(Number(skip)).limit(Number(limit)).lean(),
+      TodayInPast.countDocuments(filter)
+    ]);
+
+    res.json({ success: true, total, count: items.length, data: items });
+  } catch (err) {
+    res.status(500).json({ success: false, message: err.message });
+  }
+});
+
+app.get("/today-in-past/:id", firebaseAuth, async (req, res) => {
+  try {
+    const TodayInPast = getTIPModel();
+    const item = await TodayInPast.findById(req.params.id).lean();
+    if (!item) return res.status(404).json({ success: false, message: "Today In Past item not found" });
+    res.json({ success: true, data: item });
+  } catch (err) {
+    res.status(500).json({ success: false, message: err.message });
+  }
+});
+
+// Razorpay Webhook
+
+app.post(
+  "/subscription/webhook",
+  async (req, res) => {
+    try {
+      const signature = req.headers["x-razorpay-signature"];
+
+      if (
+        !signature ||
+        !verifyWebhookSignature(req.rawBody, signature)
+      ) {
+        return res.status(400).json({
+          success: false,
+          message: "Invalid webhook signature",
+        });
+      }
+
+      const payload = req.body;
+
+      const event = payload.event;
+
+      const subscription =
+        payload.payload?.subscription?.entity;
+
+      if (!subscription) {
+        return res.json({ success: true });
+      }
+
+      const conn = getUserDB();
+      const User = getUserModel(conn);
+
+      let user = null;
+
+      const firebaseUid =
+        subscription.notes?.firebase_uid;
+
+      if (firebaseUid) {
+        user = await User.findOne({
+          userId: firebaseUid,
+        });
+      }
+
+      if (!user) {
+        user = await User.findOne({
+          subscriptionId: subscription.id,
+        });
+      }
+
+      if (!user) {
+        return res.json({
+          success: true,
+          message: "User not found",
+        });
+      }
+
+      user.subscriptionId = subscription.id;
+      user.subscriptionStatus = subscription.status;
+
+      switch (event) {
+
+        case "subscription.activated":
+
+          user.isPremium = true;
+
+          break;
+
+        case "subscription.charged":
+
+          user.isPremium = true;
+
+          if (subscription.current_end) {
+            user.premiumExpiry = new Date(
+              subscription.current_end * 1000
+            );
+          }
+
+          if (
+            payload.payload.payment &&
+            payload.payload.payment.entity
+          ) {
+            user.lastPaymentId =
+              payload.payload.payment.entity.id;
+          }
+
+          break;
+
+        case "subscription.completed":
+
+          user.isPremium = false;
+          user.subscriptionId = null;
+          user.subscriptionStatus = null;
+
+          break;
+
+        case "subscription.cancelled":
+
+          user.isPremium = false;
+          user.subscriptionId = null;
+          user.subscriptionStatus = null;
+
+          break;
+
+        case "subscription.halted":
+
+          user.isPremium = false;
+          user.subscriptionId = null;
+          user.subscriptionStatus = null;
+
+          break;
+
+        case "subscription.paused":
+
+          user.isPremium = false;
+
+          break;
+
+        case "payment.failed":
+
+          user.isPremium = false;
+
+          break;
+
+        default:
+          break;
+      }
+
+      await user.save();
+
+      return res.json({
+        success: true,
+      });
+
+    } catch (err) {
+
+      console.error(err);
+
+      return res.status(500).json({
+        success: false,
+        message: err.message,
+      });
+
+    }
+  }
+);
+
+// ** razorpay webhook **
+
 app.use((req, res) => {
   res.status(404).json({ success: false, message: "Route not found" });
 });
@@ -1168,6 +2051,7 @@ module.exports = {
   getITModel,
   getDYKModel,
   getTIPModel,
+  collections,
   getUserModel,
   getAnalyticsModel,
   getAttemptHistoryModel,
