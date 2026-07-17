@@ -1617,15 +1617,16 @@ app.post(
             message: "Some selected questions do not exist in the database.",
           });
         }
-      } else if (questionSource === "random") {
-        // Fallback: If no explicit IDs are sent but source is random, fetch on the backend
-        selectedQuestions = await fetchRandomQuestions({
-          collection,
-          exam,
-          subject,
-          topic,
-          count: Number(questionCount),
-        });
+        // } 
+        // else if (questionSource === "random") {
+        //   // Fallback: If no explicit IDs are sent but source is random, fetch on the backend
+        //   selectedQuestions = await fetchRandomQuestions({
+        //     collection,
+        //     exam,
+        //     subject,
+        //     topic,
+        //     count: Number(questionCount),
+        //   });
       } else {
         return res.status(400).json({
           success: false,
@@ -1655,9 +1656,7 @@ app.post(
       challengeDocument = await Challenge.create({
         inviteCode,
         shareUrl,
-
         ownerId: req.userId,
-
         ownerUserID: owner.userID || null,
 
         ownerName:
