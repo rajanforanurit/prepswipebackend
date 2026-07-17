@@ -585,7 +585,7 @@ const BookmarkSchema = new mongoose.Schema({
     type: mongoose.Schema.Types.Mixed,
     required: true,
   },
-  collection: {
+  collectionname: {
     type: String,
     required: true,
     enum: ["pcsquestions", "bookquestions", "paragraphquestions"],
@@ -597,7 +597,7 @@ const BookmarkSchema = new mongoose.Schema({
   },
 }, { timestamps: false });
 
-BookmarkSchema.index({ userId: 1, questionId: 1, collection: 1 }, { unique: true });
+BookmarkSchema.index({ userId: 1, questionId: 1, collectionname: 1 }, { unique: true });
 
 function getBookmarkModel(connection) {
   if (connection.models.Bookmark) return connection.models.Bookmark;
@@ -722,7 +722,7 @@ const ChallengeSchema = new mongoose.Schema(
       },
     ],
 
-    collection: {
+    collectionname: {
       type: String,
       enum: [
         "pcsquestions",
@@ -1260,14 +1260,14 @@ function validateChallenge({
 }
 
 async function fetchRandomQuestions({
-  collection = "pcsquestions",
+  collectionname = "pcsquestions",
   exam,
   subject,
   topic,
   count = 10,
 }) {
   const numCount = Math.max(1, Math.min(Number(count) || 10, 100));
-  const model = getQuestionModel(collection);
+  const model = getQuestionModel(collectionname);
 
   const query = {};
   if (exam) {
@@ -1289,12 +1289,12 @@ async function fetchRandomQuestions({
 }
 
 async function fetchManualQuestions({
-  collection = "pcsquestions",
+  collectionname = "pcsquestions",
   questionIds,
 }) {
 
   const Question =
-    getQuestionModel(collection);
+    getQuestionModel(collectionname);
 
   return await Question.find({
     _id: {
@@ -1516,7 +1516,7 @@ app.post(
         questionSource = "random",
         questionIds = [],
         questionCount = 20,
-        collection = "pcsquestions",
+        collectionname = "pcsquestions",
         maxParticipants = 10,
         allowLateJoin = false,
         autoStart = false,
@@ -1607,7 +1607,7 @@ app.post(
       // Prioritize client-provided questionIds (supports both client-side random and manual selections)
       if (Array.isArray(questionIds) && questionIds.length > 0) {
         selectedQuestions = await fetchManualQuestions({
-          collection,
+          collectionname,
           questionIds,
         });
 
@@ -1621,7 +1621,7 @@ app.post(
         // else if (questionSource === "random") {
         //   // Fallback: If no explicit IDs are sent but source is random, fetch on the backend
         //   selectedQuestions = await fetchRandomQuestions({
-        //     collection,
+        //     collectionname,
         //     exam,
         //     subject,
         //     topic,
@@ -1685,7 +1685,7 @@ app.post(
 
         questions: challengeQuestions,
 
-        collection,
+        collectionname,
 
         maxParticipants,
 
@@ -2012,7 +2012,7 @@ app.get("/community/:id/questions", firebaseAuth, async (req, res) => {
     }
 
     const questionIds = challenge.questions.map(q => q.questionId);
-    const QuestionModel = getQuestionModel(challenge.collection || "pcsquestions");
+    const QuestionModel = getQuestionModel(challenge.collectionname || "pcsquestions");
 
     const rawQuestions = await QuestionModel.find({ _id: { $in: questionIds } }).lean();
 
@@ -2182,7 +2182,7 @@ app.post("/community/:id/leave", firebaseAuth, async (req, res) => {
     }
 
     if (challenge.status === "waiting") {
-      // Hard delete from collection prior to quiz initialization
+      // Hard delete from collectionname prior to quiz initialization
       await ChallengeParticipant.deleteOne({ _id: participant._id });
     } else {
       // Soft leave to maintain participant data integrity for current leaderboard results
@@ -2245,7 +2245,7 @@ app.delete("/community/:id", firebaseAuth, async (req, res) => {
 // SEARCH QUESTIONS FOR MANUAL SELECTION
 app.get("/community/questions/search", firebaseAuth, async (req, res) => {
   try {
-    const { collection = "pcsquestions", exam, subject, topic, search, limit = 20, skip = 0 } = req.query;
+    const { collectionname = "pcsquestions", exam, subject, topic, search, limit = 20, skip = 0 } = req.query;
     const query = {};
 
     if (exam) query.exam = buildExamMatch(exam);
@@ -2256,7 +2256,7 @@ app.get("/community/questions/search", firebaseAuth, async (req, res) => {
       query["english.question"] = { $regex: search, $options: "i" };
     }
 
-    const QuestionModel = getQuestionModel(collection);
+    const QuestionModel = getQuestionModel(collectionname);
     const [questions, total] = await Promise.all([
       QuestionModel.find(query).skip(Number(skip)).limit(Number(limit)).lean(),
       QuestionModel.countDocuments(query)
