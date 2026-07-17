@@ -1168,7 +1168,6 @@ module.exports = {
   getITModel,
   getDYKModel,
   getTIPModel,
-  collections,
   getUserModel,
   getAnalyticsModel,
   getAttemptHistoryModel,
