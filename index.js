@@ -1902,7 +1902,7 @@ app.get("/rooms/created", firebaseAuth, async (req, res) => {
   try {
     const userConnLocal = getUserDB();
     const Room = getRoomModel(userConnLocal);
-    
+
     const rooms = await Room.find({ hostId: req.userId }).sort({ createdAt: -1 }).lean();
     res.json({ success: true, count: rooms.length, rooms });
   } catch (err) {
@@ -1915,11 +1915,11 @@ app.get("/rooms/history", firebaseAuth, async (req, res) => {
   try {
     const userConnLocal = getUserDB();
     const Room = getRoomModel(userConnLocal);
-    
-    const rooms = await Room.find({ 
-      "participants.userId": req.userId 
+
+    const rooms = await Room.find({
+      "participants.userId": req.userId
     }).sort({ updatedAt: -1 }).lean();
-    
+
     res.json({ success: true, count: rooms.length, rooms });
   } catch (err) {
     res.status(500).json({ success: false, message: err.message });
@@ -2089,7 +2089,11 @@ app.delete("/rooms/:roomId", firebaseAuth, async (req, res) => {
       return res.status(403).json({ success: false, message: "Only the room host can delete this room" });
     }
 
-    await Room.findOneAndDelete({ roomId: String(roomId).toUpperCase() });
+    // Soft-delete by setting status to cancelled
+    await Room.findOneAndUpdate(
+      { roomId: String(roomId).toUpperCase() },
+      { $set: { status: "cancelled" } }
+    );
 
     res.json({ success: true, message: "Room deleted successfully" });
   } catch (err) {
