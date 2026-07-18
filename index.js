@@ -1897,6 +1897,35 @@ app.post("/rooms/join", firebaseAuth, async (req, res) => {
   }
 });
 
+// Fetch rooms created by the authenticated user
+app.get("/rooms/created", firebaseAuth, async (req, res) => {
+  try {
+    const userConnLocal = getUserDB();
+    const Room = getRoomModel(userConnLocal);
+    
+    const rooms = await Room.find({ hostId: req.userId }).sort({ createdAt: -1 }).lean();
+    res.json({ success: true, count: rooms.length, rooms });
+  } catch (err) {
+    res.status(500).json({ success: false, message: err.message });
+  }
+});
+
+// Fetch rooms the authenticated user has joined or completed
+app.get("/rooms/history", firebaseAuth, async (req, res) => {
+  try {
+    const userConnLocal = getUserDB();
+    const Room = getRoomModel(userConnLocal);
+    
+    const rooms = await Room.find({ 
+      "participants.userId": req.userId 
+    }).sort({ updatedAt: -1 }).lean();
+    
+    res.json({ success: true, count: rooms.length, rooms });
+  } catch (err) {
+    res.status(500).json({ success: false, message: err.message });
+  }
+});
+
 // Submit/finish custom room quiz
 app.post("/rooms/:roomId/submit", firebaseAuth, async (req, res) => {
   try {
