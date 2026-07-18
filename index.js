@@ -1747,26 +1747,72 @@ app.post("/rooms/create", firebaseAuth, async (req, res) => {
     let lockedQuestionIds = [];
 
     if (questionSelection === "random") {
-      const query = {};
-      if (examType) query.exam = buildExamMatch(examType);
-      if (subject) query.subject = subject;
-
       const model = getQuestionModel(collectionName);
       const limitCount = Math.max(1, Math.min(Number(questionCount) || 10, 50));
+      let pickedIds = [];
 
-      // Retrieve random question IDs to lock them for all participants
-      const sample = await model.aggregate([
-        { $match: query },
+      // Tier 1: Try to match both Exam Target and Subject strictly
+      const queryTier1 = {};
+      if (examType) queryTier1.exam = buildExamMatch(examType);
+      if (subject) queryTier1.subject = subject;
+
+      const sampleTier1 = await model.aggregate([
+        { $match: queryTier1 },
         { $sample: { size: limitCount } },
         { $project: { _id: 1 } }
       ]);
+      pickedIds = sampleTier1.map(q => q._id);
 
-      lockedQuestionIds = sample.map(q => q._id);
+      // Tier 2: Fallback to Subject-only (if we need more, ignore Exam target constraints)
+      if (pickedIds.length < limitCount && subject) {
+        const needed = limitCount - pickedIds.length;
+        const queryTier2 = {
+          subject: subject,
+          _id: { $nin: pickedIds }
+        };
+        const sampleTier2 = await model.aggregate([
+          { $match: queryTier2 },
+          { $sample: { size: needed } },
+          { $project: { _id: 1 } }
+        ]);
+        pickedIds = [...pickedIds, ...sampleTier2.map(q => q._id)];
+      }
+
+      // Tier 3: Fallback to Exam-only (if we still need more, ignore Subject constraints)
+      if (pickedIds.length < limitCount && examType) {
+        const needed = limitCount - pickedIds.length;
+        const queryTier3 = {
+          exam: buildExamMatch(examType),
+          _id: { $nin: pickedIds }
+        };
+        const sampleTier3 = await model.aggregate([
+          { $match: queryTier3 },
+          { $sample: { size: needed } },
+          { $project: { _id: 1 } }
+        ]);
+        pickedIds = [...pickedIds, ...sampleTier3.map(q => q._id)];
+      }
+
+      // Tier 4: Absolute Fallback (Unfiltered random questions inside this specific collection)
+      if (pickedIds.length < limitCount) {
+        const needed = limitCount - pickedIds.length;
+        const queryTier4 = {
+          _id: { $nin: pickedIds }
+        };
+        const sampleTier4 = await model.aggregate([
+          { $match: queryTier4 },
+          { $sample: { size: needed } },
+          { $project: { _id: 1 } }
+        ]);
+        pickedIds = [...pickedIds, ...sampleTier4.map(q => q._id)];
+      }
+
+      lockedQuestionIds = pickedIds;
 
       if (lockedQuestionIds.length === 0) {
         return res.status(400).json({
           success: false,
-          message: "No questions match your subject/examType filters. Please adjust them."
+          message: "The question collection is completely empty. Please try another source."
         });
       }
     } else {
