@@ -1873,6 +1873,52 @@ app.post("/rooms/create", firebaseAuth, async (req, res) => {
   }
 });
 
+// Edit room details (Only accessible by the host)
+app.patch("/rooms/:roomId", firebaseAuth, async (req, res) => {
+  try {
+    const { roomId } = req.params;
+    const { title, status, maxParticipants } = req.body;
+
+    const userConnLocal = getUserDB();
+    const Room = getRoomModel(userConnLocal);
+
+    // Find the room first to verify ownership
+    const room = await Room.findOne({ roomId: String(roomId).toUpperCase() });
+    if (!room) {
+      return res.status(404).json({ success: false, message: "Room not found" });
+    }
+
+    if (room.hostId !== req.userId) {
+      return res.status(403).json({ success: false, message: "Only the room host can edit this room" });
+    }
+
+    const updates = {};
+    if (title !== undefined) updates.title = String(title).trim();
+    if (status !== undefined) {
+      const allowedStatuses = ["active", "completed", "cancelled"];
+      if (!allowedStatuses.includes(status)) {
+        return res.status(400).json({ success: false, message: "Invalid status value" });
+      }
+      updates.status = status;
+    }
+
+    // Explicitly allow setting maxParticipants to null to lift constraints
+    if (maxParticipants !== undefined) {
+      updates.maxParticipants = maxParticipants ? Number(maxParticipants) : null;
+    }
+
+    const updatedRoom = await Room.findOneAndUpdate(
+      { roomId: String(roomId).toUpperCase() },
+      { $set: updates },
+      { new: true } // Returns the modified document
+    );
+
+    res.json({ success: true, room: updatedRoom });
+  } catch (err) {
+    res.status(500).json({ success: false, message: err.message });
+  }
+});
+
 // Join custom room (via Room ID & optional Password / Shared Link)
 app.post("/rooms/join", firebaseAuth, async (req, res) => {
   try {
