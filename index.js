@@ -2070,6 +2070,33 @@ app.get("/rooms/:roomId", firebaseAuth, async (req, res) => {
   }
 });
 
+
+
+// Delete room (Only accessible by the host)
+app.delete("/rooms/:roomId", firebaseAuth, async (req, res) => {
+  try {
+    const { roomId } = req.params;
+    const userConnLocal = getUserDB();
+    const Room = getRoomModel(userConnLocal);
+
+    // Find the room first to verify ownership
+    const room = await Room.findOne({ roomId: String(roomId).toUpperCase() });
+    if (!room) {
+      return res.status(404).json({ success: false, message: "Room not found" });
+    }
+
+    if (room.hostId !== req.userId) {
+      return res.status(403).json({ success: false, message: "Only the room host can delete this room" });
+    }
+
+    await Room.findOneAndDelete({ roomId: String(roomId).toUpperCase() });
+
+    res.json({ success: true, message: "Room deleted successfully" });
+  } catch (err) {
+    res.status(500).json({ success: false, message: err.message });
+  }
+});
+
 app.get("/current-affairs", async (req, res) => {
   try {
     const { limit = 20, skip = 0, subject, date, search } = req.query;
