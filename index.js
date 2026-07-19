@@ -2181,11 +2181,7 @@ app.delete("/rooms/:roomId", firebaseAuth, async (req, res) => {
       return res.status(403).json({ success: false, message: "Only the room host can delete this room" });
     }
 
-    // Soft-delete by setting status to cancelled
-    await Room.findOneAndUpdate(
-      { roomId: String(roomId).toUpperCase() },
-      { $set: { status: "cancelled" } }
-    );
+    await Room.findOneAndDelete({ roomId: String(roomId).toUpperCase() });
 
     res.json({ success: true, message: "Room deleted successfully" });
   } catch (err) {
