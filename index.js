@@ -625,11 +625,13 @@ const RoomSchema = new mongoose.Schema({
   collectionName: { type: String, default: "pcsquestions" },
   questionSelection: { type: String, enum: ["random", "specified"], default: "random" },
   questions: [{ type: mongoose.Schema.Types.Mixed }], // Array of locked question _ids
-  maxParticipants: { type: Number, default: null }, // Null means unlimited
+  maxParticipants: { type: Number, default: 4 }, // Null means unlimited
   isPrivate: { type: Boolean, default: false },
   password: { type: String, default: null },
   status: { type: String, enum: ["active", "completed", "cancelled"], default: "active" },
-  participants: [RoomParticipantSchema]
+  participants: [RoomParticipantSchema],
+  marks: { type: Number, default: 1 },
+  negativeMarks: { type: Number, default: 0 }
 }, { timestamps: true });
 
 function getRoomModel(connection) {
@@ -1719,7 +1721,9 @@ app.post("/rooms/create", firebaseAuth, async (req, res) => {
       specifiedQuestionIds,
       isPrivate = false,
       password,
-      maxParticipants
+      maxParticipants = 4, // Default set to 4
+      marks = 1,           // Default set to 1 mark per question
+      negativeMarks = 0
     } = req.body;
 
     if (!title) {
@@ -1877,7 +1881,7 @@ app.post("/rooms/create", firebaseAuth, async (req, res) => {
 app.patch("/rooms/:roomId", firebaseAuth, async (req, res) => {
   try {
     const { roomId } = req.params;
-    const { title, status, maxParticipants } = req.body;
+    const { title, status, maxParticipants, marks, negativeMarks } = req.body;
 
     const userConnLocal = getUserDB();
     const Room = getRoomModel(userConnLocal);
@@ -1901,11 +1905,9 @@ app.patch("/rooms/:roomId", firebaseAuth, async (req, res) => {
       }
       updates.status = status;
     }
-
-    // Explicitly allow setting maxParticipants to null to lift constraints
-    if (maxParticipants !== undefined) {
-      updates.maxParticipants = maxParticipants ? Number(maxParticipants) : null;
-    }
+    if (maxParticipants !== undefined) updates.maxParticipants = Number(maxParticipants);
+    if (marks !== undefined) updates.marks = Number(marks);
+    if (negativeMarks !== undefined) updates.negativeMarks = Number(negativeMarks);
 
     const updatedRoom = await Room.findOneAndUpdate(
       { roomId: String(roomId).toUpperCase() },
@@ -2036,6 +2038,10 @@ app.post("/rooms/:roomId/submit", firebaseAuth, async (req, res) => {
       return res.status(404).json({ success: false, message: "Quiz room not found" });
     }
 
+    // Fall back to schema defaults if fields are missing
+    const marksPerQuestion = room.marks !== undefined ? room.marks : 1;
+    const negativeMarksPerQuestion = room.negativeMarks !== undefined ? room.negativeMarks : 0;
+
     const participant = room.participants.find(p => p.userId === req.userId);
     if (!participant) {
       return res.status(403).json({ success: false, message: "You are not registered in this quiz room" });
@@ -2052,9 +2058,10 @@ app.post("/rooms/:roomId/submit", firebaseAuth, async (req, res) => {
     for (const a of attempts) {
       const isCorrect = !!a.isCorrect;
       const isSkipped = !!a.isSkipped;
+      // Scoring math modified to reflect room settings [3]
       const marksEarned = isCorrect
-        ? (a.questionMeta?.marks || 2)
-        : (isSkipped ? 0 : -(a.questionMeta?.negativeMarks || 0));
+        ? marksPerQuestion
+        : (isSkipped ? 0 : -negativeMarksPerQuestion);
 
       totalScore += marksEarned;
       totalTime += a.timeTakenSeconds || 0;
@@ -2063,7 +2070,11 @@ app.post("/rooms/:roomId/submit", firebaseAuth, async (req, res) => {
       await updateAnalyticsOnSubmit({
         userId: req.userId,
         questionId: a.questionId,
-        questionMeta: a.questionMeta || {},
+        questionMeta: {
+          ...a.questionMeta,
+          marks: marksPerQuestion,         // Overwrites original global marks tracker meta
+          negativeMarks: negativeMarksPerQuestion
+        },
         selectedOption: a.selectedOption,
         isCorrect,
         isSkipped,
